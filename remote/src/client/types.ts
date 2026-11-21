@@ -62,7 +62,6 @@ export type SurfaceView = {
   disposeMiddleClickGesture: (() => void) | null;
   disposeCanvasPan: (() => void) | null;
   resizeObserver: ResizeObserver | null;
-  fitQueued: boolean;
   canvasPan: CanvasPoint;
   lastCanvasViewport: CanvasSize | null;
   needsDefaultCanvasPan: boolean;
