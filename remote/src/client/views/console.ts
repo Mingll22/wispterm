@@ -24,7 +24,7 @@ import {
   updateAiChatControls,
   updateSurfaceCursors,
 } from "../surfaces";
-import { applyVisualViewportSizing, isMobileRemoteShell } from "../mobile_layout";
+import { applyVisualViewportSizing, isMobileRemoteShell, MOBILE_REMOTE_MEDIA_QUERY } from "../mobile_layout";
 import {
   bindMobileTextInput,
   blurMobileTextInput,
@@ -32,7 +32,7 @@ import {
   renderMobileTextInputMarkup,
 } from "../mobile_text_input";
 import { bindVirtualKeyboard, renderVirtualKeyboardMarkup, syncVirtualKeyboardInputMode } from "../vkbd";
-import { mobileVisualZoomLabel, mobileVisualZoomPercent, nextMobileVisualZoom } from "../mobile_visual_zoom";
+import { MOBILE_VISUAL_ZOOM_LEVELS, mobileVisualZoomLabel } from "../mobile_visual_zoom";
 import { selectedMobileSurfaceKind, shouldShowMobileVirtualKeyboard } from "../mobile_surface_mode";
 import { remoteTabSelectionSidebarAction } from "../sidebar_behavior";
 import {
@@ -74,7 +74,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   const initialSessionInputValue = hasSavedSessionKey ? maskSessionKey(savedSessionKey) : savedSessionKey;
 
   app.innerHTML = `
-    <section class="console-shell" data-kbd-visible="${state.kbdVisible}" data-mobile-surface-kind="none" data-mobile-vkbd-visible="false" data-mobile-input-mode="${state.mobileInputMode}" data-mobile-visual-zoom="${mobileVisualZoomPercent(state.mobileVisualZoom)}" data-drawer-open="${state.drawerOpen}" data-sidebar-collapsed="${state.sidebarCollapsed}" data-desktop-panel-mode="${state.desktopPanelMode}" data-sidebar-page="${sidebarPage}">
+    <section class="console-shell" data-kbd-visible="${state.kbdVisible}" data-mobile-surface-kind="none" data-mobile-vkbd-visible="false" data-mobile-input-mode="${state.mobileInputMode}" data-drawer-open="${state.drawerOpen}" data-sidebar-collapsed="${state.sidebarCollapsed}" data-desktop-panel-mode="${state.desktopPanelMode}" data-sidebar-page="${sidebarPage}">
       <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
       <aside class="sidebar glass-surface" id="sidebar">
         <div class="sidebar-main">
@@ -156,6 +156,16 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
                 </label>
               </fieldset>
             </div>
+            <div class="panel mobile-terminal-scale">
+              <fieldset id="mobile-terminal-scale" class="setting-options">
+                <legend>${tr("Terminal display scale", "终端显示缩放")}</legend>
+                ${MOBILE_VISUAL_ZOOM_LEVELS.map((zoom) => `
+                  <label>
+                    <input type="radio" name="mobile-terminal-scale" value="${zoom}"${state.mobileVisualZoom === zoom ? " checked" : ""} />
+                    <span>${mobileVisualZoomLabel(zoom)}</span>
+                  </label>`).join("")}
+              </fieldset>
+            </div>
             <details class="settings-group">
               <summary>${tr("Weixin Direct", "微信直连")}</summary>
               <div class="panel weixin-panel" id="weixin-panel">
@@ -195,6 +205,13 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
           </div>
         </div>
       </aside>
+      <div class="collapsed-controls">
+        <button type="button" class="icon-button desktop-sidebar-toggle glass-surface" id="sidebar-expand" aria-label="${tr("Open sidebar", "打开侧栏")}" title="${tr("Open sidebar", "打开侧栏")}" aria-controls="sidebar" aria-expanded="${!state.sidebarCollapsed}">
+          ${iconMenu()}
+        </button>
+        <span class="status-pip workspace-status glass-surface" id="workspace-status" data-state="offline">${tr("Offline", "未连接")}</span>
+        ${themeToggleMarkup("collapsed-theme glass-surface")}
+      </div>
       <section class="workspace">
         <header class="mobile-bar glass-surface">
           <button type="button" class="icon-button" id="drawer-open" aria-label="${tr("Open menu", "打开菜单")}" aria-controls="sidebar" aria-expanded="${state.drawerOpen}">
@@ -208,28 +225,25 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
               <div class="mobile-surface-menu" id="mobile-surface-menu" hidden></div>
             </div>
           </div>
-          <div class="mobile-chrome-controls" aria-label="${tr("Remote controls", "远程连接控制")}">
-            <button type="button" class="status-pip" id="mobile-status-pip" data-state="offline" aria-label="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}" title="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}">${tr("Offline", "未连接")}</button>
-            <span class="status-latency-popover" id="mobile-status-latency" hidden aria-live="polite">${tr("Latency unavailable", "暂无延迟数据")}</span>
-            <button type="button" class="mobile-zoom-toggle" id="mobile-zoom-toggle" data-zoom="${mobileVisualZoomPercent(state.mobileVisualZoom)}" aria-label="${mobileVisualZoomToggleLabel(state.mobileVisualZoom)}" title="${mobileVisualZoomToggleLabel(state.mobileVisualZoom)}">
-              ${mobileVisualZoomCompactLabel(state.mobileVisualZoom)}
-            </button>
-            <button type="button" class="mobile-input-mode-toggle" id="mobile-input-mode-toggle" data-mode="${state.mobileInputMode}" aria-label="${mobileInputModeToggleLabel(state.mobileInputMode)}" title="${mobileInputModeToggleLabel(state.mobileInputMode)}">
-              ${mobileInputModeLabel(state.mobileInputMode)}
-            </button>
-            <button type="button" class="mobile-keyboard-toggle" id="kbd-toggle" aria-label="${tr("Toggle shortcut keyboard", "切换快捷键键盘")}" title="${tr("Toggle shortcut keyboard", "切换快捷键键盘")}">
-              ${tr("Keys", "快捷键")}
-            </button>
+          <div class="mobile-chrome-controls">
+            <div class="mobile-connection">
+              <button type="button" class="status-pip" id="mobile-status-pip" data-state="offline" aria-label="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}" title="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}">${tr("Offline", "未连接")}</button>
+              <span class="status-latency-popover" id="mobile-status-latency" hidden aria-live="polite">${tr("Latency unavailable", "暂无延迟数据")}</span>
+            </div>
+            <div class="mobile-terminal-actions" role="group" aria-label="${tr("Terminal input controls", "终端输入控制")}">
+              <button type="button" class="mobile-input-mode-toggle" id="mobile-input-mode-toggle" data-mode="${state.mobileInputMode}" aria-label="${mobileInputModeToggleLabel(state.mobileInputMode)}" title="${mobileInputModeToggleLabel(state.mobileInputMode)}">
+                ${mobileInputModeLabel(state.mobileInputMode)}
+              </button>
+              <button type="button" class="mobile-keyboard-toggle" id="kbd-toggle" aria-pressed="${state.kbdVisible}" aria-label="${tr("Toggle shortcut keyboard", "切换快捷键键盘")}" title="${tr("Toggle shortcut keyboard", "切换快捷键键盘")}">
+                ${tr("Keys", "快捷键")}
+              </button>
+            </div>
           </div>
         </header>
         <div class="desktop-dock">
-          <button type="button" class="icon-button desktop-sidebar-toggle glass-surface" id="sidebar-expand" aria-label="${tr("Open sidebar", "打开侧栏")}" title="${tr("Open sidebar", "打开侧栏")}" aria-controls="sidebar" aria-expanded="${!state.sidebarCollapsed}">
-            ${iconMenu()}
-          </button>
           <span id="workspace-title">${tr("Remote workspace", "远程工作区")}</span>
           <div class="surface-strip" id="surface-strip"></div>
           <span class="control-state" id="control-state" hidden>${tr("Read only", "只读")}</span>
-          <span class="status-pip workspace-status glass-surface" id="workspace-status" data-state="offline">${tr("Offline", "未连接")}</span>
         </div>
         <section class="terminal-panel">
           <div id="remote-panels" class="panels-stage empty"></div>
@@ -300,6 +314,12 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   });
 
   bindMobileChrome();
+  document.querySelector("#mobile-terminal-scale")?.addEventListener("change", (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement)) return;
+    const zoom = MOBILE_VISUAL_ZOOM_LEVELS.find((level) => String(level) === input.value);
+    if (zoom !== undefined) setMobileVisualZoom(zoom);
+  });
   bindViewportRefit();
   bindVirtualKeyboard(() => setKbdVisible(false));
   bindMobileTextInput();
@@ -319,7 +339,6 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   setStatus(currentConnectionStatus);
   updateMobileSurfaceMode();
   syncMobileInputModeUi();
-  syncMobileVisualZoomUi();
   syncMobileTextInputFocusForMode();
   updateInputUi();
   if (savedSessionKey) queueMicrotask(() => connect(savedSessionKey));
@@ -637,6 +656,7 @@ function updateMobileSurfaceMode(): void {
     const keyLabel = state.kbdVisible ? tr("Hide shortcut keyboard", "隐藏快捷键键盘") : tr("Show shortcut keyboard", "显示快捷键键盘");
     const label = state.mobileInputMode === "view" ? tr("Switch to Edit to use shortcut keys", "切换到编辑模式后使用快捷键") : keyLabel;
     keyboardToggle.setAttribute("aria-label", label);
+    keyboardToggle.setAttribute("aria-pressed", String(state.kbdVisible));
     keyboardToggle.title = label;
   }
   const inputModeToggle = document.querySelector<HTMLButtonElement>("#mobile-input-mode-toggle");
@@ -645,14 +665,7 @@ function updateMobileSurfaceMode(): void {
     inputModeToggle.hidden = chatMode;
     inputModeToggle.setAttribute("aria-hidden", String(chatMode));
   }
-  const zoomToggle = document.querySelector<HTMLButtonElement>("#mobile-zoom-toggle");
-  if (zoomToggle) {
-    const chatMode = surfaceKind === "ai_chat";
-    zoomToggle.hidden = chatMode;
-    zoomToggle.setAttribute("aria-hidden", String(chatMode));
-  }
   syncMobileInputModeUi();
-  syncMobileVisualZoomUi();
 }
 
 function bindMobileChrome(): void {
@@ -678,9 +691,6 @@ function bindMobileChrome(): void {
   });
   document.querySelector<HTMLButtonElement>("#mobile-input-mode-toggle")?.addEventListener("click", () => {
     setMobileInputMode(nextMobileInputMode(state.mobileInputMode));
-  });
-  document.querySelector<HTMLButtonElement>("#mobile-zoom-toggle")?.addEventListener("click", () => {
-    setMobileVisualZoom(nextMobileVisualZoom(state.mobileVisualZoom));
   });
   bindMobileSurfaceSelectorLayout();
 }
@@ -753,25 +763,7 @@ function setMobileVisualZoom(zoom: MobileVisualZoom): void {
   if (state.mobileVisualZoom === zoom) return;
   state.mobileVisualZoom = zoom;
   saveMobileVisualZoom(zoom);
-  syncMobileVisualZoomUi();
   syncSurfaceVisualZooms();
-  updateMobileSurfaceMode();
-}
-
-function syncMobileVisualZoomUi(): void {
-  const zoom = state.mobileVisualZoom;
-  const percent = mobileVisualZoomPercent(zoom);
-  const shell = document.querySelector<HTMLElement>(".console-shell");
-  if (shell) shell.dataset.mobileVisualZoom = String(percent);
-
-  const toggle = document.querySelector<HTMLButtonElement>("#mobile-zoom-toggle");
-  if (!toggle) return;
-
-  const label = mobileVisualZoomToggleLabel(zoom);
-  toggle.dataset.zoom = String(percent);
-  toggle.textContent = mobileVisualZoomCompactLabel(zoom);
-  toggle.setAttribute("aria-label", label);
-  toggle.title = label;
 }
 
 function mobileInputModeLabel(mode: MobileInputMode): string {
@@ -780,15 +772,6 @@ function mobileInputModeLabel(mode: MobileInputMode): string {
 
 function mobileInputModeToggleLabel(mode: MobileInputMode): string {
   return tr(`Switch to ${mobileInputModeLabel(nextMobileInputMode(mode)).toLowerCase()} mode`, `切换到${mobileInputModeLabel(nextMobileInputMode(mode))}模式`);
-}
-
-function mobileVisualZoomToggleLabel(zoom: MobileVisualZoom): string {
-  return tr(`Set terminal zoom to ${mobileVisualZoomLabel(nextMobileVisualZoom(zoom))}`, `将终端显示缩放切换为 ${mobileVisualZoomLabel(nextMobileVisualZoom(zoom))}`);
-}
-
-function mobileVisualZoomCompactLabel(zoom: MobileVisualZoom): string {
-  if (zoom === 1) return "1x";
-  return String(zoom).replace(/^0/, "");
 }
 
 function nextMobileInputMode(mode: MobileInputMode): MobileInputMode {
@@ -881,6 +864,7 @@ function bindViewportRefit(): void {
   viewportRefitBound = true;
 
   window.addEventListener("resize", refit, { passive: true });
+  window.matchMedia(MOBILE_REMOTE_MEDIA_QUERY).addEventListener("change", syncSurfaceVisualZooms);
   window.visualViewport?.addEventListener("resize", refit);
   window.visualViewport?.addEventListener("scroll", refit);
 }

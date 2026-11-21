@@ -91,13 +91,9 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
   control.hidden = true;
   const controlTitle = document.createElement("span");
   controlTitle.className = "terminal-lease-title";
-  const controlStatus = document.createElement("span");
-  controlStatus.className = "terminal-lease-status";
-  controlStatus.setAttribute("role", "status");
   const controlButton = document.createElement("button");
   controlButton.type = "button";
   control.appendChild(controlTitle);
-  control.appendChild(controlStatus);
   control.appendChild(controlButton);
   control.addEventListener("pointerdown", (event) => event.stopPropagation());
   control.addEventListener("click", (event) => event.stopPropagation());
@@ -142,7 +138,6 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     host,
     control,
     controlTitle,
-    controlStatus,
     controlButton,
     scrollbar,
     scrollbarThumb,
@@ -631,17 +626,12 @@ function applySurfaceInputPolicy(view: SurfaceView, surface: LayoutSurface | und
   if (!showLease || !surface) return;
   const reason = terminalControl.reason(surface.id);
   const connected = terminalControl.isAvailable();
-  let status = connected ? tr("Viewing", "只读") : tr("Offline", "未连接");
-  if (held) status = tr("This browser", "本浏览器控制");
-  else if (terminalControl.controlledByOther(surface.id)) status = tr("Another client", "其他端控制");
-  else if (reason === "desktop") status = tr("Desktop in control", "桌面端控制");
   const action = held ? tr("Release", "归还") : tr("Take control", "接管");
   const title = surface.title?.trim() || tr("Terminal", "终端");
   if (view.controlTitle.textContent !== title) {
     view.controlTitle.textContent = title;
     view.controlTitle.title = title;
   }
-  if (view.controlStatus.textContent !== status) view.controlStatus.textContent = status;
   if (view.controlButton.textContent !== action) view.controlButton.textContent = action;
   view.controlButton.classList.toggle("secondary-button", held);
   view.controlButton.disabled = !connected || reason === "unsupported";

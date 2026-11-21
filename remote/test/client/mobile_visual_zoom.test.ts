@@ -3,16 +3,15 @@ import assert from "node:assert/strict";
 
 import {
   mobileVisualZoomLabel,
-  nextMobileVisualZoom,
+  MOBILE_VISUAL_ZOOM_LEVELS,
   normalizeMobileVisualZoom,
   scaleVisualCanvasSize,
 } from "../../src/client/mobile_visual_zoom";
 
-test("mobile visual zoom cycles from full size down to quarter size", () => {
-  assert.equal(nextMobileVisualZoom(1), 0.75);
-  assert.equal(nextMobileVisualZoom(0.75), 0.5);
-  assert.equal(nextMobileVisualZoom(0.5), 0.25);
-  assert.equal(nextMobileVisualZoom(0.25), 1);
+test("stored numeric strings restore every selectable mobile zoom level", () => {
+  for (const zoom of MOBILE_VISUAL_ZOOM_LEVELS) {
+    assert.equal(normalizeMobileVisualZoom(String(zoom)), zoom);
+  }
 });
 
 test("mobile visual zoom renders compact percent labels", () => {

@@ -21,8 +21,6 @@ test("initial acquisition measures each visible pane and renewals contain no siz
   control.reconcile([panel, other], true);
   control.receive("left", "tablet", 3, "acquired", true);
   control.receive("right", "phone", 4, "denied", true);
-  assert.equal(control.controlledByOther("left"), false);
-  assert.equal(control.controlledByOther("right"), true);
   control.renew();
   control.reconcile([panel, other], true);
   control.reconcile([{ ...panel, grid: { cols: 97, rows: 36 } }, other], true);

@@ -128,6 +128,10 @@
     display: none;
   }
 
+  .mobile-terminal-scale {
+    display: block;
+  }
+
   .remote-tabs-panel {
     flex: 0 0 auto;
     min-width: 0;
@@ -172,10 +176,10 @@
     display: grid;
     grid-template-columns: 40px minmax(0, 1fr) auto;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     min-height: 44px;
     margin: max(7px, var(--safe-top)) max(7px, var(--safe-right)) 0 max(7px, var(--safe-left));
-    padding: 3px 6px;
+    padding: 5px 8px;
     border-radius: var(--radius-floating);
     overflow: visible;
   }
@@ -193,6 +197,8 @@
     width: 40px;
     height: 40px;
     min-width: 40px;
+    border-color: transparent;
+    background: transparent;
   }
 
   .mobile-bar-main {
@@ -212,31 +218,47 @@
   }
 
   .mobile-chrome-controls {
-    position: relative;
     display: flex;
     align-items: center;
     justify-content: flex-end;
     min-width: 0;
-    gap: 6px;
+    gap: 8px;
+  }
+
+  .mobile-connection {
+    position: relative;
+  }
+
+  .mobile-connection .status-pip {
+    width: auto;
+    min-width: 44px;
+    padding-inline: 2px;
+  }
+
+  .mobile-terminal-actions {
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    border-radius: var(--radius);
+    background: var(--ghost-bg);
   }
 
   .mobile-input-mode-toggle,
-  .mobile-zoom-toggle,
   .mobile-keyboard-toggle {
     -webkit-appearance: none;
     appearance: none;
     display: inline-grid;
     place-items: center;
     flex: 0 0 auto;
-    height: 36px;
+    height: 38px;
     min-width: 32px;
     padding: 0 7px;
-    border: 1px solid var(--line);
+    border: 1px solid transparent;
     border-radius: var(--radius-sm);
-    background: var(--ghost-bg-strong);
+    background: transparent;
     color: var(--text);
     font-size: 11px;
-    font-weight: 800;
+    font-weight: 650;
     text-align: center;
     line-height: 1;
   }
@@ -244,11 +266,7 @@
   .mobile-input-mode-toggle {
     min-width: 46px;
     padding: 0 8px;
-  }
-
-  .mobile-zoom-toggle {
-    min-width: 34px;
-    padding: 0 6px;
+    background: var(--segment-selected);
   }
 
   .mobile-keyboard-toggle {
@@ -262,22 +280,19 @@
     border-color: var(--accent);
   }
 
-  .mobile-zoom-toggle:not([data-zoom="100"]) {
-    color: var(--accent-ink);
-    background: var(--accent);
-    border-color: var(--accent);
+  .mobile-keyboard-toggle[aria-pressed="true"] {
+    background: var(--accent-soft);
   }
 
   .console-shell[data-mobile-input-mode="view"] .mobile-keyboard-toggle {
     opacity: 0.45;
-    background: var(--surface-overlay);
   }
 
   .mobile-keyboard-toggle:disabled {
     cursor: default;
   }
 
-  .console-shell:is([data-mobile-surface-kind="ai_chat"], [data-mobile-surface-kind="none"]) :is(#mobile-zoom-toggle, #mobile-input-mode-toggle, #kbd-toggle) {
+  .console-shell:is([data-mobile-surface-kind="ai_chat"], [data-mobile-surface-kind="none"]) .mobile-terminal-actions {
     display: none;
   }
 
@@ -378,10 +393,6 @@
     display: none;
   }
 
-  .mobile-surface-selector[data-collapsed="true"] {
-    justify-content: flex-end;
-  }
-
   .mobile-surface-selector[data-collapsed="true"] .mobile-surface-menu-toggle {
     display: inline-flex;
   }
@@ -389,12 +400,10 @@
   .mobile-surface-menu {
     position: absolute;
     top: calc(100% + 6px);
-    right: 0;
-    left: auto;
+    inset-inline-start: 0;
     z-index: 60;
     display: grid;
-    min-width: min(220px, 74vw);
-    max-width: min(260px, 78vw);
+    width: min(220px, calc(100vw - 76px));
     gap: 4px;
     padding: 6px;
     border: 1px solid var(--line);
@@ -570,6 +579,28 @@
     height: 48px;
     border-radius: var(--radius-sm);
     padding: 0;
+  }
+}
+
+@media (min-width: 720px) and (max-width: 860px) and (min-height: 640px),
+  (min-width: 861px) and (max-width: 1024px) and (min-height: 640px) and (pointer: coarse) {
+  .console-shell {
+    grid-template-columns: var(--collapsed-rail-width) minmax(0, 1fr);
+  }
+
+  .workspace {
+    grid-column: 2;
+  }
+
+  .collapsed-controls {
+    display: flex;
+    padding-bottom: max(var(--workspace-inset), var(--safe-bottom));
+  }
+
+  .collapsed-controls .desktop-sidebar-toggle,
+  .collapsed-controls .workspace-status,
+  .console-shell[data-drawer-open="true"] .collapsed-controls {
+    display: none;
   }
 }
 

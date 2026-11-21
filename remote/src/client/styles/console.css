@@ -1,5 +1,7 @@
 .console-shell {
   --sidebar-width: 252px;
+  --collapsed-rail-width: 52px;
+  --workspace-header-height: 40px;
   --workspace-inset: 10px;
   height: var(--remote-visual-viewport-height, 100dvh);
   min-height: 0;
@@ -40,7 +42,7 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: max(10px, var(--safe-top)) 12px 12px max(12px, var(--safe-left));
+  padding: var(--safe-top) 12px 12px max(12px, var(--safe-left));
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: thin;
@@ -52,7 +54,7 @@
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
-  min-height: 40px;
+  min-height: var(--workspace-header-height);
   padding-inline: 4px;
 }
 
@@ -232,6 +234,37 @@
   display: none;
 }
 
+.collapsed-controls {
+  display: none;
+  grid-area: 1 / 1;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: var(--workspace-inset) 4px var(--workspace-inset) var(--workspace-inset);
+}
+
+.collapsed-controls .icon-button,
+.collapsed-controls .workspace-status {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  border-radius: var(--radius);
+}
+
+.collapsed-controls .workspace-status {
+  gap: 0;
+  padding: 0;
+  font-size: 0;
+}
+
+.collapsed-controls .collapsed-theme {
+  margin-top: auto;
+}
+
+.mobile-terminal-scale {
+  display: none;
+}
+
 .terminal-panel {
   grid-row: 2;
   min-width: 0;
@@ -296,9 +329,7 @@
   padding: var(--workspace-inset) var(--workspace-inset) 0;
 }
 
-.desktop-dock #workspace-title,
-.desktop-dock .desktop-sidebar-toggle,
-.desktop-dock .workspace-status {
+.desktop-dock #workspace-title {
   display: none;
 }
 
@@ -313,13 +344,6 @@
   white-space: nowrap;
 }
 
-.desktop-dock .desktop-sidebar-toggle {
-  flex: 0 0 auto;
-  width: 38px;
-  height: 38px;
-  border-radius: var(--radius);
-}
-
 .control-state {
   margin-inline-start: auto;
   padding: 4px 7px;
@@ -328,16 +352,6 @@
   color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
-}
-
-.desktop-dock .workspace-status {
-  margin-inline-start: auto;
-  width: auto;
-  min-width: 76px;
-  height: 38px;
-  padding-inline: 10px;
-  border-radius: 999px;
-  cursor: default;
 }
 
 
@@ -810,7 +824,7 @@
 
 @media (min-width: 861px) and (pointer: fine), (min-width: 861px) and (pointer: none), (min-width: 1025px) {
   .console-shell[data-sidebar-collapsed="true"] {
-    grid-template-columns: 0 minmax(0, 1fr);
+    grid-template-columns: var(--collapsed-rail-width) minmax(0, 1fr);
   }
 
   .console-shell[data-sidebar-collapsed="true"] .sidebar {
@@ -824,7 +838,10 @@
       visibility 0s var(--motion-duration);
   }
 
-  .console-shell[data-sidebar-collapsed="true"] .desktop-dock,
+  .console-shell[data-sidebar-collapsed="true"] .collapsed-controls {
+    display: flex;
+  }
+
   .workspace[data-context-title] .desktop-dock,
   .workspace[data-panel-selector] .desktop-dock,
   .desktop-dock:has(.control-state:not([hidden])) {
@@ -833,36 +850,6 @@
 
   .workspace[data-context-title] .desktop-dock #workspace-title {
     display: block;
-  }
-
-  .console-shell[data-sidebar-collapsed="true"] .desktop-dock .desktop-sidebar-toggle {
-    display: grid;
-  }
-
-  .console-shell[data-sidebar-collapsed="true"] .desktop-dock .workspace-status {
-    display: inline-flex;
-  }
-
-  .console-shell[data-sidebar-collapsed="true"] .workspace[data-title-in-pane]:not([data-panel-selector]) {
-    grid-template-columns: auto minmax(0, 1fr);
-
-    .desktop-dock {
-      grid-column: 1;
-      grid-row: 2;
-      flex-direction: column;
-      padding-inline-end: 4px;
-    }
-
-    .workspace-status {
-      min-width: 38px;
-      gap: 0;
-      padding: 0;
-      font-size: 0;
-    }
-
-    .terminal-panel {
-      grid-column: 2;
-    }
   }
 
   .panels-stage[data-desktop-mode="single"] .remote-panel {
@@ -874,7 +861,7 @@
     min-width: 0;
     min-height: 0;
     display: none;
-    padding: 8px;
+    padding: 6px;
   }
 
   .panels-stage[data-desktop-mode="single"] .remote-panel.selected {
@@ -982,7 +969,8 @@
 
 .terminal-lease {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: var(--workspace-header-height);
   min-width: 0;
   align-items: center;
   column-gap: 8px;
@@ -1001,11 +989,6 @@
   white-space: nowrap;
 }
 
-.terminal-lease-status {
-  text-align: end;
-}
-
-.terminal-lease-status,
 .terminal-lease button {
   white-space: nowrap;
 }

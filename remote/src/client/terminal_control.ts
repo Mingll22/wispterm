@@ -18,7 +18,6 @@ type VisibleTerminal = {
   requestedGrid?: TerminalGrid;
   attempted: boolean;
   leaseId?: number;
-  owner?: string | null;
   reason?: TerminalControlReason;
 };
 
@@ -53,11 +52,6 @@ export class TerminalControl {
     return this.visible.get(surfaceId)?.reason;
   }
 
-  controlledByOther(surfaceId: string): boolean {
-    const owner = this.visible.get(surfaceId)?.owner;
-    return owner != null && owner !== this.clientId;
-  }
-
   reconcile(targets: TerminalControlTarget[], foreground: boolean): void {
     if (!this.isAvailable()) return;
     const current = new Set(targets.map(({ surfaceId }) => surfaceId));
@@ -88,7 +82,6 @@ export class TerminalControl {
     if (terminal?.leaseId === undefined) return;
     this.send({ type: "terminal-control", action: "release", surfaceId, leaseId: terminal.leaseId });
     terminal.leaseId = undefined;
-    terminal.owner = null;
     terminal.reason = "released";
   }
 
@@ -119,14 +112,12 @@ export class TerminalControl {
       return false;
     }
     const previousLease = terminal.leaseId;
-    const previousOwner = terminal.owner;
     const previousReason = terminal.reason;
     terminal.leaseId = held ? leaseId : undefined;
-    terminal.owner = owner;
     terminal.reason = reason;
     if (reason === "expired" && previousLease !== undefined) terminal.attempted = false;
     if (held && foreground && terminal.grid) this.resize(surfaceId, terminal, terminal.grid);
-    return previousLease !== terminal.leaseId || previousOwner !== owner || previousReason !== terminal.reason;
+    return previousLease !== terminal.leaseId || previousReason !== terminal.reason;
   }
 
   private requestControl(surfaceId: string, action: "acquire" | "takeover"): void {

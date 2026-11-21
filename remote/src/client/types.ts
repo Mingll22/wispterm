@@ -56,7 +56,6 @@ export type SurfaceView = {
   host: HTMLDivElement;
   control: HTMLElement;
   controlTitle: HTMLSpanElement;
-  controlStatus: HTMLSpanElement;
   controlButton: HTMLButtonElement;
   scrollbar: HTMLDivElement;
   scrollbarThumb: HTMLDivElement;

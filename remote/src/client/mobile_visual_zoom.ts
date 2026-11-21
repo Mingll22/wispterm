@@ -14,11 +14,6 @@ export function normalizeMobileVisualZoom(raw: unknown): MobileVisualZoom {
   return findZoomLevel(normalized);
 }
 
-export function nextMobileVisualZoom(zoom: MobileVisualZoom): MobileVisualZoom {
-  const index = MOBILE_VISUAL_ZOOM_LEVELS.indexOf(zoom);
-  return MOBILE_VISUAL_ZOOM_LEVELS[(index + 1) % MOBILE_VISUAL_ZOOM_LEVELS.length] ?? 1;
-}
-
 export function mobileVisualZoomLabel(zoom: MobileVisualZoom): string {
   return `${mobileVisualZoomPercent(zoom)}%`;
 }
