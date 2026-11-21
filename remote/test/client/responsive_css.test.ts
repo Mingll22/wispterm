@@ -63,7 +63,7 @@ test("mobile top bar uses compact status controls instead of large mode buttons"
   assert.match(markup, /class="mobile-chrome-controls"/);
   assert.match(markup, /mobileInputModeLabel/);
   assert.match(markup, /mobileVisualZoomCompactLabel/);
-  assert.match(markup, /id="kbd-toggle"[\s\S]*>\s*Key\s*<\/button>/);
+  assert.match(markup, /id="kbd-toggle"[\s\S]*>\s*快捷键\s*<\/button>/);
   assert.match(barRule, /grid-template-columns:\s*40px\s+minmax\(0,\s*1fr\)\s+auto\s*;/);
   assert.doesNotMatch(barRule, /52px|58px/);
   assert.match(controlsRule, /display:\s*flex\s*;/);

@@ -3,7 +3,7 @@ export const WEB_BUILD_TIME = normalizedBuildTime(import.meta.env?.VITE_WISPTERM
 
 export function webVersionLabel(buildTime: string | null = WEB_BUILD_TIME): string {
   const normalized = normalizedBuildTime(buildTime);
-  return normalized ? `Web ${WEB_VERSION} (${normalized})` : `Web ${WEB_VERSION}`;
+  return normalized ? `网页版 ${WEB_VERSION} (${normalized})` : `网页版 ${WEB_VERSION}`;
 }
 
 export function remoteBrandMarkup(buildTime: string | null = WEB_BUILD_TIME): string {

@@ -915,7 +915,7 @@
 }
 
 .terminal-mount::after {
-  content: "outside terminal grid";
+  content: "终端显示区外";
   position: absolute;
   right: 12px;
   bottom: 8px;

@@ -91,7 +91,7 @@ export function syncVirtualKeyboardInputMode(): void {
   const disabled = inputMode === "view";
   ime.disabled = disabled;
   ime.setAttribute("aria-disabled", String(disabled));
-  ime.title = disabled ? "System keyboard disabled in view mode" : "Return to system keyboard";
+  ime.title = disabled ? "查看模式下无法使用系统键盘" : "切换回系统键盘";
   if (disabled) ime.dataset.active = "false";
 }
 

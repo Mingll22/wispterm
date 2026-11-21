@@ -47,6 +47,12 @@ export function setTransportHooks(next: TransportHooks): void {
   hooks = next;
 }
 
+const RELAY_NOTICE_LABELS = new Map([
+  ["Browser paired; input enabled", "浏览器已配对，可以发送输入"],
+  ["WispTerm connected", "WispTerm 已连接"],
+  ["WispTerm disconnected", "WispTerm 已断开"],
+]);
+
 const encoder = new TextEncoder();
 let reconnectAttempts = 0;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -94,14 +100,14 @@ export function connect(sessionKey: string): void {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${protocol}//${location.host}/ws/browser?session=${encodeURIComponent(sessionKey)}`);
   state.socket = ws;
-  hooks.setStatus(connectionStatusConnecting("Connecting..."));
+  hooks.setStatus(connectionStatusConnecting("正在连接…"));
   hooks.onInputUiChanged();
 
   ws.addEventListener("open", () => {
     if (state.socket !== ws) return;
     reconnectAttempts = 0;
     updateConnectionStatus();
-    pushNotice("Connected. Waiting for WispTerm layout...");
+    pushNotice("已接入中继，正在等待 WispTerm 标签页…");
     hooks.onNoticesChanged();
     hooks.onInputUiChanged();
     startHeartbeat(ws);
@@ -116,7 +122,7 @@ export function connect(sessionKey: string): void {
     if (state.activeSessionKey === sessionKey) {
       scheduleReconnect();
     } else {
-      hooks.setStatus(connectionStatusOffline("Disconnected"));
+      hooks.setStatus(connectionStatusOffline());
     }
     hooks.onInputUiChanged();
   });
@@ -178,7 +184,7 @@ export function connect(sessionKey: string): void {
       const bytes = decodeHex(message.data);
       if (surfaceId && bytes) writeSurfaceBytes(surfaceId, bytes);
     } else if (message.type === "notice" && typeof message.message === "string") {
-      pushNotice(message.message);
+      pushNotice(RELAY_NOTICE_LABELS.get(message.message) ?? message.message);
       hooks.onNoticesChanged();
     }
   });
@@ -194,7 +200,7 @@ export function disconnect(): void {
     state.socket = null;
   }
   resetConnectionHealth();
-  hooks.setStatus(connectionStatusOffline("Disconnected"));
+  hooks.setStatus(connectionStatusOffline());
 }
 
 export function sendInputBytes(surfaceId: string, data: string): void {
@@ -252,7 +258,7 @@ function scheduleReconnect(): void {
   const exponent = Math.min(reconnectAttempts, 5);
   const delay = Math.min(RECONNECT_MAX_DELAY_MS, RECONNECT_MIN_DELAY_MS * 2 ** exponent);
   reconnectAttempts += 1;
-  hooks.setStatus(connectionStatusConnecting(`Reconnecting in ${Math.round(delay / 1000)}s...`));
+  hooks.setStatus(connectionStatusConnecting(`${Math.round(delay / 1000)} 秒后重新连接…`));
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     if (state.activeSessionKey) connect(state.activeSessionKey);
@@ -289,7 +295,7 @@ function updateLatencyFromPong(message: { at?: unknown }): void {
 function updateConnectionStatus(): void {
   const ws = state.socket;
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    hooks.setStatus(connectionStatusOffline("Disconnected"));
+    hooks.setStatus(connectionStatusOffline());
     return;
   }
   if (!wisptermPeerConnected) {
@@ -297,7 +303,7 @@ function updateConnectionStatus(): void {
     return;
   }
   if (lastLatencyMs === null) {
-    hooks.setStatus(connectionStatusConnecting("Connected · measuring latency..."));
+    hooks.setStatus(connectionStatusConnecting("已连接 · 正在测量延迟…"));
     return;
   }
   hooks.setStatus(connectionStatusForLatency(lastLatencyMs));

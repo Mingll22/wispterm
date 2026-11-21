@@ -21,7 +21,7 @@ export function renderMobileTextInputMarkup(): string {
     <textarea
       id="mobile-text-input"
       class="mobile-text-input"
-      aria-label="Terminal text input"
+      aria-label="终端文本输入"
       autocomplete="off"
       autocapitalize="off"
       autocorrect="off"

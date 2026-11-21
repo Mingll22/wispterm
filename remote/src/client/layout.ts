@@ -18,7 +18,7 @@ export function normalizeLayout(message: RelayMessage): LayoutState {
         : [];
       return {
         index,
-        title: typeof tab.title === "string" ? tab.title : `Tab ${index + 1}`,
+        title: typeof tab.title === "string" ? tab.title : `标签页 ${index + 1}`,
         focusedSurfaceId: typeof tab.focusedSurfaceId === "string" ? tab.focusedSurfaceId : surfaces[0]?.id,
         surfaces,
       };

@@ -62,7 +62,7 @@ export function subscribeToTheme(sub: Subscriber): () => void {
 }
 
 export function updateThemeToggleButtons(): void {
-  const label = mode === "dark" ? "Switch to light theme" : "Switch to dark theme";
+  const label = mode === "dark" ? "切换到浅色主题" : "切换到深色主题";
   const icon = mode === "dark" ? iconSun() : iconMoon();
   document.querySelectorAll<HTMLButtonElement>("[data-theme-toggle]").forEach((button) => {
     button.setAttribute("aria-label", label);

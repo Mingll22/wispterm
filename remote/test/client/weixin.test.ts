@@ -29,7 +29,7 @@ test("bridgeStatusText describes binding and target state", () => {
       { enabled: true, target_session: "abcdef", reply_timeout_ms: 120000 },
       { bound: true, user_id: "user@im.wechat" },
     ),
-    "Bound · abcd**** · /ping to test",
+    "已绑定 · abcd**** · 发送 /ping 测试",
   );
 });
 
@@ -39,13 +39,13 @@ test("bridgeStatusText points disabled bound users to the bridge switch", () => 
       { enabled: false, target_session: "abcdef", reply_timeout_ms: 120000 },
       { bound: true, user_id: "user@im.wechat" },
     ),
-    "Bound · turn on Bridge",
+    "已绑定 · 请启用微信直连",
   );
 });
 
 test("bindActionText switches between bind and unbind from binding state", () => {
-  assert.equal(bindActionText({ bound: false }), "Bind");
-  assert.equal(bindActionText({ bound: true, user_id: "user@im.wechat" }), "Unbind");
+  assert.equal(bindActionText({ bound: false }), "绑定");
+  assert.equal(bindActionText({ bound: true, user_id: "user@im.wechat" }), "解绑");
 });
 
 test("saveWeixinSettings returns the PUT response shape", async () => {

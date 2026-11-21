@@ -22,5 +22,5 @@ export function iconMoon(): string {
 }
 
 export function themeToggleMarkup(extraClass = ""): string {
-  return `<button type="button" class="icon-button theme-toggle${extraClass ? ` ${extraClass}` : ""}" data-theme-toggle aria-label="Toggle theme" title="Toggle theme"></button>`;
+  return `<button type="button" class="icon-button theme-toggle${extraClass ? ` ${extraClass}` : ""}" data-theme-toggle aria-label="切换主题" title="切换主题"></button>`;
 }

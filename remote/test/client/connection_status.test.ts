@@ -11,15 +11,15 @@ import {
 test("connection status uses red when WispTerm peer is not connected", () => {
   assert.deepEqual(connectionStatusWithoutPeer(null), {
     kind: "offline",
-    text: "Not connected",
+    text: "桌面端未连接",
     latencyMs: null,
-    detail: "Latency unavailable",
+    detail: "暂无延迟数据",
   });
   assert.deepEqual(connectionStatusWithoutPeer(42), {
     kind: "offline",
-    text: "Not connected · relay 42 ms",
+    text: "桌面端未连接 · 中继延迟 42 ms",
     latencyMs: 42,
-    detail: "Relay latency: 42 ms",
+    detail: "中继延迟 42 ms",
   });
 });
 
@@ -27,25 +27,25 @@ test("connection status maps 500ms threshold to low and high latency", () => {
   assert.equal(HIGH_LATENCY_THRESHOLD_MS, 500);
   assert.deepEqual(connectionStatusForLatency(499), {
     kind: "online",
-    text: "Low latency · 499 ms",
+    text: "低延迟 · 499 ms",
     latencyMs: 499,
-    detail: "Latency: 499 ms",
+    detail: "延迟 499 ms",
   });
   assert.deepEqual(connectionStatusForLatency(500), {
     kind: "online",
-    text: "Low latency · 500 ms",
+    text: "低延迟 · 500 ms",
     latencyMs: 500,
-    detail: "Latency: 500 ms",
+    detail: "延迟 500 ms",
   });
   assert.deepEqual(connectionStatusForLatency(501), {
     kind: "high-latency",
-    text: "High latency · 501 ms",
+    text: "高延迟 · 501 ms",
     latencyMs: 501,
-    detail: "Latency: 501 ms",
+    detail: "延迟 501 ms",
   });
 });
 
 test("latency disclosure rounds measurements for click feedback", () => {
-  assert.equal(latencyDisclosureText(null), "Latency unavailable");
-  assert.equal(latencyDisclosureText(123.6), "Latency: 124 ms");
+  assert.equal(latencyDisclosureText(null), "暂无延迟数据");
+  assert.equal(latencyDisclosureText(123.6), "延迟 124 ms");
 });

@@ -9,16 +9,16 @@ export function renderLogin(app: HTMLElement, onSuccess: () => void, message = "
     <section class="shell auth-shell">
       ${themeToggleMarkup("theme-toggle-floating")}
       <form class="panel auth-panel" id="login-form">
-        <h1>Sign in</h1>
+        <h1>登录</h1>
         <label>
-          Username
+          用户名
           <input name="username" autocomplete="username" required />
         </label>
         <label>
-          Password
+          密码
           <input name="password" type="password" autocomplete="current-password" required />
         </label>
-        <button type="submit">Sign in</button>
+        <button type="submit">登录</button>
         <output class="form-message">${escapeText(message)}</output>
       </form>
       <footer class="brand auth-brand-footer">${remoteBrandMarkup()}</footer>
@@ -37,7 +37,7 @@ export function renderLogin(app: HTMLElement, onSuccess: () => void, message = "
       }),
     });
     if (!res.ok) {
-      renderLogin(app, onSuccess, "Login failed");
+      renderLogin(app, onSuccess, res.status === 401 ? "用户名或密码不正确" : "登录失败，请稍后重试");
       return;
     }
     onSuccess();
