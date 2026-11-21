@@ -1,3 +1,4 @@
+import { tr } from "./i18n";
 import { isMobileRemoteShell } from "./mobile_layout";
 import { activeSurfaceIdForInput, state } from "./state";
 
@@ -21,7 +22,7 @@ export function renderMobileTextInputMarkup(): string {
     <textarea
       id="mobile-text-input"
       class="mobile-text-input"
-      aria-label="终端文本输入"
+      aria-label="${tr("Terminal text input", "终端文本输入")}"
       autocomplete="off"
       autocapitalize="off"
       autocorrect="off"

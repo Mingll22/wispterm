@@ -1,6 +1,8 @@
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 
+import { initializeLocale } from "./i18n";
+
 import { setSurfaceInputHandler } from "./surfaces";
 import { kickReconnectIfIdle, loadMe, sendInputBytes, setTransportHooks } from "./transport";
 import { setMobileTextInputSender } from "./mobile_text_input";
@@ -19,6 +21,7 @@ if (!appRoot) {
   throw new Error("Missing app root");
 }
 const app: HTMLElement = appRoot;
+initializeLocale();
 
 setSurfaceInputHandler(sendInputBytes);
 setMobileTextInputSender(sendInputBytes);

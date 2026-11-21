@@ -1,3 +1,4 @@
+import { tr } from "./i18n";
 import { maskSessionKey } from "./storage";
 
 export type WeixinSettings = {
@@ -71,58 +72,58 @@ export function normalizeWeixinSettings(input: Partial<WeixinSettings>): WeixinS
 }
 
 export function bridgeStatusText(settings: WeixinSettings, binding: WeixinBindingSummary): string {
-  if (!binding.bound) return "未绑定 · 请扫码绑定微信";
-  if (!settings.enabled) return "已绑定 · 请启用微信直连";
+  if (!binding.bound) return tr("Not bound · scan to bind Weixin", "未绑定 · 请扫码绑定微信");
+  if (!settings.enabled) return tr("Bound · turn on Bridge", "已绑定 · 请启用微信直连");
 
-  const parts = ["已绑定"];
+  const parts = [tr("Bound", "已绑定")];
   if (settings.target_session) parts.push(maskSessionKey(settings.target_session));
-  parts.push("发送 /ping 测试");
+  parts.push(tr("/ping to test", "发送 /ping 测试"));
   return parts.join(" · ");
 }
 
-export function bindActionText(binding: WeixinBindingSummary): "绑定" | "解绑" {
-  return binding.bound ? "解绑" : "绑定";
+export function bindActionText(binding: WeixinBindingSummary): string {
+  return binding.bound ? tr("Unbind", "解绑") : tr("Bind", "绑定");
 }
 
 export function weixinBindStatusText(status: string, detail = ""): string {
   switch (status) {
-    case "wait": return "请使用微信扫码";
-    case "scaned": return "已扫码，请在微信中确认";
+    case "wait": return tr("Scan the QR code with Weixin", "请使用微信扫码");
+    case "scaned": return tr("Scanned. Confirm in Weixin", "已扫码，请在微信中确认");
     case "bound":
-    case "confirmed": return "绑定成功";
-    case "expired": return "二维码已过期，请重新绑定";
-    case "failed": return "绑定失败";
-    default: return detail || "等待微信确认…";
+    case "confirmed": return tr("Bound successfully", "绑定成功");
+    case "expired": return tr("QR code expired. Start binding again", "二维码已过期，请重新绑定");
+    case "failed": return tr("Bind failed", "绑定失败");
+    default: return detail || tr("Waiting for Weixin confirmation...", "等待微信确认…");
   }
 }
 
 export function weixinErrorText(error: unknown, fallback: string): string {
   if (!(error instanceof Error)) return fallback;
   switch (error.message) {
-    case "login required": return "请重新登录";
-    case "invalid json": return "设置格式无效";
-    case "weixin qrcode unavailable": return "暂时无法获取微信二维码";
-    case "qrcode required": return "缺少微信二维码，请重新绑定";
-    case "weixin qrcode status unavailable": return "暂时无法获取微信扫码状态";
-    case "confirmed weixin binding missing bot_token": return "微信未返回绑定凭据，请重新绑定";
-    case "not found": return "未找到微信直连功能";
+    case "login required": return tr("Sign in again", "请重新登录");
+    case "invalid json": return tr("Invalid settings", "设置格式无效");
+    case "weixin qrcode unavailable": return tr("Could not load the Weixin QR code", "暂时无法获取微信二维码");
+    case "qrcode required": return tr("Missing QR code. Start binding again", "缺少微信二维码，请重新绑定");
+    case "weixin qrcode status unavailable": return tr("Could not check Weixin scan status", "暂时无法获取微信扫码状态");
+    case "confirmed weixin binding missing bot_token": return tr("Weixin did not return a binding token. Start binding again", "微信未返回绑定凭据，请重新绑定");
+    case "not found": return tr("Weixin Direct is unavailable", "未找到微信直连功能");
     default: return error.message || fallback;
   }
 }
 
 export async function fetchWeixinSettings(): Promise<WeixinSettingsResponse> {
   const res = await weixinApi("/api/weixin/settings");
-  return weixinApiJson<WeixinSettingsResponse>(res, "加载失败");
+  return weixinApiJson<WeixinSettingsResponse>(res, tr("Load failed", "加载失败"));
 }
 
 export async function saveWeixinSettings(settings: WeixinSettings): Promise<WeixinSaveSettingsResponse> {
   const res = await weixinApi("/api/weixin/settings", { method: "PUT", body: JSON.stringify(settings) });
-  return weixinApiJson<WeixinSaveSettingsResponse>(res, "保存失败");
+  return weixinApiJson<WeixinSaveSettingsResponse>(res, tr("Save failed", "保存失败"));
 }
 
 export async function startWeixinBind(): Promise<WeixinBindStartResponse> {
   const res = await weixinApi("/api/weixin/bind/start", { method: "POST" });
-  return weixinApiJson<WeixinBindStartResponse>(res, "绑定失败");
+  return weixinApiJson<WeixinBindStartResponse>(res, tr("Bind failed", "绑定失败"));
 }
 
 export async function pollWeixinBindStatus(
@@ -131,11 +132,11 @@ export async function pollWeixinBindStatus(
   const res = await weixinApi(`/api/weixin/bind/status?qrcode=${encodeURIComponent(qrcode)}`);
   return weixinApiJson<{ status: string; message?: string; binding: WeixinBindingSummary }>(
     res,
-    "检查绑定状态失败",
+    tr("Check failed", "检查绑定状态失败"),
   );
 }
 
 export async function unbindWeixin(): Promise<void> {
   const res = await weixinApi("/api/weixin/bind", { method: "DELETE" });
-  if (!res.ok) await throwWeixinApiError(res, "解绑失败");
+  if (!res.ok) await throwWeixinApiError(res, tr("Unbind failed", "解绑失败"));
 }

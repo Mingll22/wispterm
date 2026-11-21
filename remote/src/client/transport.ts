@@ -1,3 +1,4 @@
+import { tr } from "./i18n";
 import type { ConnectionStatus, MeResponse } from "./types";
 import { state, currentTab, pushNotice } from "./state";
 import { isLayoutMessage, normalizeLayout } from "./layout";
@@ -48,9 +49,9 @@ export function setTransportHooks(next: TransportHooks): void {
 }
 
 const RELAY_NOTICE_LABELS = new Map([
-  ["Browser paired; input enabled", "浏览器已配对，可以发送输入"],
-  ["WispTerm connected", "WispTerm 已连接"],
-  ["WispTerm disconnected", "WispTerm 已断开"],
+  ["Browser paired; input enabled", tr("Browser paired; input enabled", "浏览器已配对，可以发送输入")],
+  ["WispTerm connected", tr("WispTerm connected", "WispTerm 已连接")],
+  ["WispTerm disconnected", tr("WispTerm disconnected", "WispTerm 已断开")],
 ]);
 
 const encoder = new TextEncoder();
@@ -100,14 +101,14 @@ export function connect(sessionKey: string): void {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${protocol}//${location.host}/ws/browser?session=${encodeURIComponent(sessionKey)}`);
   state.socket = ws;
-  hooks.setStatus(connectionStatusConnecting("正在连接…"));
+  hooks.setStatus(connectionStatusConnecting(tr("Connecting...", "正在连接…")));
   hooks.onInputUiChanged();
 
   ws.addEventListener("open", () => {
     if (state.socket !== ws) return;
     reconnectAttempts = 0;
     updateConnectionStatus();
-    pushNotice("已接入中继，正在等待 WispTerm 标签页…");
+    pushNotice(tr("Connected. Waiting for WispTerm layout...", "已接入中继，正在等待 WispTerm 标签页…"));
     hooks.onNoticesChanged();
     hooks.onInputUiChanged();
     startHeartbeat(ws);
@@ -258,7 +259,7 @@ function scheduleReconnect(): void {
   const exponent = Math.min(reconnectAttempts, 5);
   const delay = Math.min(RECONNECT_MAX_DELAY_MS, RECONNECT_MIN_DELAY_MS * 2 ** exponent);
   reconnectAttempts += 1;
-  hooks.setStatus(connectionStatusConnecting(`${Math.round(delay / 1000)} 秒后重新连接…`));
+  hooks.setStatus(connectionStatusConnecting(tr(`Reconnecting in ${Math.round(delay / 1000)}s...`, `${Math.round(delay / 1000)} 秒后重新连接…`)));
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     if (state.activeSessionKey) connect(state.activeSessionKey);
@@ -303,7 +304,7 @@ function updateConnectionStatus(): void {
     return;
   }
   if (lastLatencyMs === null) {
-    hooks.setStatus(connectionStatusConnecting("已连接 · 正在测量延迟…"));
+    hooks.setStatus(connectionStatusConnecting(tr("Connected · measuring latency...", "已连接 · 正在测量延迟…")));
     return;
   }
   hooks.setStatus(connectionStatusForLatency(lastLatencyMs));

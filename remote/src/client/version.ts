@@ -1,9 +1,10 @@
+import { tr } from "./i18n";
 export const WEB_VERSION = "v0.32.0";
 export const WEB_BUILD_TIME = normalizedBuildTime(import.meta.env?.VITE_WISPTERM_WEB_BUILD_TIME);
 
 export function webVersionLabel(buildTime: string | null = WEB_BUILD_TIME): string {
   const normalized = normalizedBuildTime(buildTime);
-  return normalized ? `网页版 ${WEB_VERSION} (${normalized})` : `网页版 ${WEB_VERSION}`;
+  return normalized ? `${tr("Web", "网页版")} ${WEB_VERSION} (${normalized})` : `${tr("Web", "网页版")} ${WEB_VERSION}`;
 }
 
 export function remoteBrandMarkup(buildTime: string | null = WEB_BUILD_TIME): string {

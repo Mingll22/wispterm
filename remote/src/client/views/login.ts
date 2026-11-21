@@ -1,3 +1,4 @@
+import { tr } from "../i18n";
 import { themeToggleMarkup } from "../icons";
 import { bindThemeToggleButtons } from "../theme";
 import { api } from "../transport";
@@ -9,16 +10,16 @@ export function renderLogin(app: HTMLElement, onSuccess: () => void, message = "
     <section class="shell auth-shell">
       ${themeToggleMarkup("theme-toggle-floating")}
       <form class="panel auth-panel" id="login-form">
-        <h1>登录</h1>
+        <h1>${tr("Sign in", "登录")}</h1>
         <label>
-          用户名
+          ${tr("Username", "用户名")}
           <input name="username" autocomplete="username" required />
         </label>
         <label>
-          密码
+          ${tr("Password", "密码")}
           <input name="password" type="password" autocomplete="current-password" required />
         </label>
-        <button type="submit">登录</button>
+        <button type="submit">${tr("Sign in", "登录")}</button>
         <output class="form-message">${escapeText(message)}</output>
       </form>
       <footer class="brand auth-brand-footer">${remoteBrandMarkup()}</footer>
@@ -37,7 +38,7 @@ export function renderLogin(app: HTMLElement, onSuccess: () => void, message = "
       }),
     });
     if (!res.ok) {
-      renderLogin(app, onSuccess, res.status === 401 ? "用户名或密码不正确" : "登录失败，请稍后重试");
+      renderLogin(app, onSuccess, res.status === 401 ? tr("Incorrect username or password", "用户名或密码不正确") : tr("Sign-in failed. Please try again", "登录失败，请稍后重试"));
       return;
     }
     onSuccess();
