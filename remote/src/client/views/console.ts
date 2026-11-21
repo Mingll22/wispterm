@@ -229,6 +229,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
           </div>
           <div class="mobile-chrome-controls">
             <div class="mobile-connection">
+              ${themeToggleMarkup("mobile-theme-toggle")}
               <button type="button" class="status-pip" id="mobile-status-pip" data-state="offline" aria-label="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}" title="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}">${tr("Offline", "未连接")}</button>
               <span class="status-latency-popover" id="mobile-status-latency" hidden aria-live="polite">${tr("Latency unavailable", "暂无延迟数据")}</span>
             </div>

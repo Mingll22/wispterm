@@ -668,11 +668,24 @@ function scheduleFit(view: SurfaceView): void {
     try {
       fitOrResize(view);
       updateCanvasPan(view);
+      alignTerminalTitle(view);
       view.term.refresh(0, Math.max(0, view.term.rows - 1));
     } catch {
       // xterm can briefly report zero-sized panels while layout is settling.
     }
   });
+}
+
+function alignTerminalTitle(view: SurfaceView): void {
+  if (view.control.hidden) return;
+  const screen = view.host.querySelector(".xterm-screen")?.getBoundingClientRect();
+  if (!screen?.width) return;
+  const header = view.control.getBoundingClientRect();
+  // Keep the title the same place when the user pans a larger grid.
+  const inset = `${screen.left - header.left - view.canvasPan.x}px`;
+  if (view.control.style.getPropertyValue("--terminal-title-inset") !== inset) {
+    view.control.style.setProperty("--terminal-title-inset", inset);
+  }
 }
 
 function applyInitialSnapshot(view: SurfaceView, surface: LayoutSurface): void {

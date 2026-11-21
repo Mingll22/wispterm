@@ -69,8 +69,6 @@
 .terminal-lease {
   min-height: var(--workspace-header-height);
   align-items: center;
-  border-bottom: 1px solid var(--line);
-  background: var(--workspace-heading-bg);
 }
 
 .sidebar-head {
@@ -812,9 +810,9 @@
 
 .status-pip::before {
   content: "";
-  flex: 0 0 6px;
-  width: 6px;
-  height: 6px;
+  flex: none;
+  width: 7.5px;
+  height: 7.5px;
   border-radius: 50%;
   background: var(--status-color);
 }
@@ -1000,8 +998,18 @@
 
 .terminal-mount[data-terminal-lease] {
   --terminal-mount-padding: 0px;
+  --terminal-inline-gutter: 8px;
   grid-template-rows: auto minmax(0, 1fr);
+  background: var(--glass-bg);
+}
+
+.terminal-mount[data-terminal-lease]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  grid-row: 2;
   background: var(--terminal-bg);
+  pointer-events: none;
 }
 
 .terminal-lease {
@@ -1009,7 +1017,9 @@
   grid-template-columns: minmax(0, 1fr) auto;
   min-width: 0;
   column-gap: 8px;
-  padding: 5px 8px;
+  padding: 5px var(--terminal-inline-gutter);
+  padding-inline-start: clamp(var(--terminal-inline-gutter), var(--terminal-title-inset, 0px), 50%);
+  border-bottom: 1px solid var(--line);
   color: var(--muted);
   font-size: 12px;
 }
@@ -1056,7 +1066,7 @@
 .terminal-mount[data-terminal-lease] .terminal-host {
   width: auto;
   height: auto;
-  margin: 6px 8px;
+  margin: 6px var(--terminal-inline-gutter);
 }
 
 .terminal-mount[data-terminal-lease] .canvas-scrollbar {

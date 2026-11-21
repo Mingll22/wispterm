@@ -229,6 +229,15 @@
 
   .mobile-connection {
     position: relative;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .mobile-bar .mobile-theme-toggle {
+    width: 32px;
+    height: 36px;
+    min-width: 32px;
   }
 
   .mobile-connection .status-pip {
@@ -582,28 +591,6 @@
   }
 }
 
-@media (min-width: 720px) and (max-width: 860px) and (min-height: 640px),
-  (min-width: 861px) and (max-width: 1024px) and (min-height: 640px) and (pointer: coarse) {
-  .console-shell {
-    grid-template-columns: var(--collapsed-rail-width) minmax(0, 1fr);
-  }
-
-  .workspace {
-    grid-column: 2;
-  }
-
-  .collapsed-controls {
-    display: flex;
-    padding-bottom: max(var(--workspace-inset), var(--safe-bottom));
-  }
-
-  .collapsed-controls .desktop-sidebar-toggle,
-  .collapsed-controls .workspace-status,
-  .console-shell[data-drawer-open="true"] .collapsed-controls {
-    display: none;
-  }
-}
-
 /* ─── Foldable: dual-fold horizontal crease (top/bottom) ─────── */
 
 @media (vertical-viewport-segments: 2) {
@@ -753,6 +740,31 @@
 }
 
 /* ─── Tiny phones / very narrow ──────────────────────────────── */
+
+@media (max-width: 400px) {
+  .mobile-bar,
+  .mobile-chrome-controls {
+    column-gap: 6px;
+  }
+
+  .mobile-input-mode-toggle,
+  .mobile-keyboard-toggle {
+    padding-inline: 3px;
+  }
+
+  .mobile-input-mode-toggle {
+    min-width: 36px;
+  }
+
+  .mobile-keyboard-toggle {
+    min-width: 42px;
+  }
+
+  .mobile-surface-menu-toggle {
+    gap: 4px;
+    padding-inline: 4px;
+  }
+}
 
 @media (max-width: 380px) {
   .vkbd-key {
