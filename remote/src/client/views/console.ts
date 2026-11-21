@@ -48,7 +48,7 @@ import {
   weixinErrorText,
   type WeixinSettingsResponse,
 } from "../weixin";
-import { connectionStatusOffline } from "../connection_status";
+import { connectionHeaderLabel, connectionStatusOffline } from "../connection_status";
 
 let viewportRefitBound = false;
 let mobileSurfaceSelectorObserver: ResizeObserver | null = null;
@@ -81,7 +81,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
           <div class="sidebar-head">
             <span class="sidebar-wordmark">WispTerm</span>
             <div class="sidebar-head-actions">
-              <span class="status-pip sidebar-status" id="sidebar-workspace-status" data-state="offline">${tr("Offline", "未连接")}</span>
+              <span class="status-pip" id="sidebar-workspace-status" data-state="offline">${tr("Offline", "未连接")}</span>
               <button type="button" class="icon-button" id="drawer-close" aria-label="${tr("Close menu", "关闭菜单")}" title="${tr("Close menu", "关闭菜单")}">
                 ${iconClose()}
               </button>
@@ -351,10 +351,7 @@ export function setStatus(status: ConnectionStatus): void {
   const dot = document.querySelector<HTMLButtonElement>("#status-dot");
   const label = document.querySelector<HTMLSpanElement>("#status-text");
   const accessibilityText = `${status.text}。 ${status.detail}`;
-  const shortLabel =
-    status.kind === "online" ? tr("Online", "已连接") :
-    status.kind === "high-latency" ? tr("Slow", "高延迟") :
-    status.kind === "connecting" ? tr("Linking", "连接中") : tr("Offline", "未连接");
+  const shortLabel = connectionHeaderLabel(status);
   if (dot) {
     dot.dataset.state = status.kind;
     dot.title = accessibilityText;

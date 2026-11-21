@@ -32,7 +32,7 @@ test("terminal panels do not reserve redundant per-panel headers", async () => {
 
   assert.match(panelRule, /grid-template-rows:\s*minmax\(0,\s*1fr\)\s*;/);
   assert.doesNotMatch(css, /\.panel-copy\b/);
-  assert.match(mountRule, /border-radius:\s*var\(--radius\)\s*;/);
+  assert.match(mountRule, /border-radius:\s*var\(--radius-floating\)\s*;/);
 });
 
 test("mobile view mode keeps drag handling while allowing native terminal text selection", async () => {

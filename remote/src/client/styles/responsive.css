@@ -8,6 +8,8 @@
   }
 
   .console-shell {
+    --mobile-toolbar-inset: 8px;
+    --mobile-toolbar-height: 54px;
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr);
     height: var(--remote-visual-viewport-height, 100dvh);
@@ -24,9 +26,9 @@
 
   .sidebar {
     position: fixed;
-    top: max(8px, var(--safe-top));
-    left: max(8px, var(--safe-left));
-    bottom: max(8px, var(--safe-bottom));
+    top: max(var(--mobile-toolbar-inset), var(--safe-top));
+    left: max(var(--mobile-toolbar-inset), var(--safe-left));
+    bottom: max(var(--mobile-toolbar-inset), var(--safe-bottom));
     width: min(360px, calc(100vw - 56px));
     max-width: 86vw;
     min-width: 0;
@@ -45,11 +47,6 @@
     padding: 12px 13px;
   }
 
-  .sidebar-navigation {
-    gap: 12px;
-    padding: 12px 13px 0;
-  }
-
   .console-shell[data-drawer-open="true"] .sidebar {
     transform: translateX(0);
     visibility: visible;
@@ -59,14 +56,13 @@
     display: grid;
   }
 
-  .sidebar-head .sidebar-status {
-    display: none;
+  .sidebar-head {
+    min-height: var(--mobile-toolbar-height);
+    padding-inline: 15px;
   }
 
-  .sidebar-head {
-    gap: 12px;
-    min-width: 0;
-    padding: 0 2px 8px;
+  .sidebar-page-nav {
+    margin-inline: 13px;
   }
 
   .sidebar-head-actions {
@@ -182,8 +178,9 @@
     grid-template-columns: 40px minmax(0, 1fr) auto;
     align-items: center;
     gap: 8px;
-    min-height: 44px;
-    margin: max(7px, var(--safe-top)) max(7px, var(--safe-right)) 0 max(7px, var(--safe-left));
+    height: var(--mobile-toolbar-height);
+    margin: max(var(--mobile-toolbar-inset), var(--safe-top)) max(var(--mobile-toolbar-inset), var(--safe-right))
+      0 max(var(--mobile-toolbar-inset), var(--safe-left));
     padding: 5px 8px;
     border-radius: var(--radius-floating);
     overflow: visible;
@@ -235,8 +232,6 @@
   }
 
   .mobile-connection .status-pip {
-    width: auto;
-    min-width: 44px;
     padding-inline: 2px;
   }
 
@@ -791,8 +786,4 @@
     gap: 4px;
   }
 
-  .mobile-bar {
-    padding-top: max(6px, var(--safe-top));
-    padding-bottom: 6px;
-  }
 }

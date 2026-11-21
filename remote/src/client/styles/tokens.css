@@ -50,7 +50,7 @@
   --glass-shadow: 0 12px 30px rgba(4, 9, 17, 0.22);
   --shadow-control: 0 1px 3px rgba(4, 9, 17, 0.20);
   --segment-selected: rgba(170, 196, 233, 0.17);
-  --terminal-heading-bg: #1a2431;
+  --workspace-heading-bg: #1a2431;
   --workspace-background: radial-gradient(ellipse at 18% 0%, #213048 0, transparent 64%), var(--bg);
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
@@ -66,7 +66,7 @@
   --glass-shadow: 0 12px 30px rgba(46, 72, 111, 0.13);
   --shadow-control: 0 1px 3px rgba(46, 72, 111, 0.12);
   --segment-selected: rgba(255, 255, 255, 0.95);
-  --terminal-heading-bg: #e9f0f9;
+  --workspace-heading-bg: #e9f0f9;
   --workspace-background: radial-gradient(ellipse at 18% 0%, #ccdff7 0, transparent 64%), var(--bg);
   --bg: #eef3f9;
   --bg-2: #e8eff8;
