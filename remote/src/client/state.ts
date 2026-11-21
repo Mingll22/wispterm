@@ -1,4 +1,5 @@
 import type { LayoutState, LayoutTab, MobileInputMode, SurfaceView } from "./types";
+import { terminalControl } from "./terminal_control";
 import {
   readSavedDesktopPanelMode,
   readSavedMobileVisualZoom,
@@ -38,6 +39,7 @@ export function activeSurfaceIdForInput(): string | null {
   if (!surfaceId) return null;
   const surface = tab?.surfaces.find((candidate) => candidate.id === surfaceId);
   if (surface?.kind === "ai_chat") return null;
+  if (surface?.terminalControl && terminalControl.leaseId(surfaceId) === undefined) return null;
   return surface?.readOnly ? null : surfaceId;
 }
 

@@ -7,6 +7,7 @@ import {
   CANVAS_WHEEL_EVENT_OPTIONS,
   canvasPanRenderState,
   defaultCanvasPan,
+  fitTerminalCanvas,
   isCanvasDrag,
   meaningfulTerminalCanvasHeight,
   panYFromVerticalScrollbarThumb,
@@ -32,6 +33,8 @@ import { cursorMoveSequence, emptyState, validPositiveInteger } from "./utils";
 import { currentTab, resetSurfaceViews, state } from "./state";
 import { getTerminalPalette, subscribeToTheme } from "./theme";
 import { REMOTE_TERMINAL_SCROLLBACK } from "./terminal_options";
+import { mapScaledTerminalPointer } from "./terminal_pointer";
+import { supportedTerminalGrid, terminalControl, type TerminalControlTarget } from "./terminal_control";
 import {
   shouldBufferLiveOutputForInitialSnapshot,
   shouldFlushBufferedOutput,
@@ -49,6 +52,7 @@ const DESKTOP_SCROLLBAR_MIN_THUMB_HEIGHT = 32;
 const DESKTOP_SCROLLBAR_VERTICAL_INSET = 10;
 
 type InputHandler = (surfaceId: string, data: string) => void;
+let controlMeasurementQueued = false;
 let inputHandler: InputHandler = () => {
   // no-op until transport registers
 };
@@ -84,6 +88,23 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
   const scrollbarThumb = document.createElement("div");
   scrollbarThumb.className = "canvas-scrollbar-thumb";
   scrollbar.appendChild(scrollbarThumb);
+  const control = document.createElement("header");
+  control.className = "terminal-lease";
+  control.hidden = true;
+  const controlTitle = document.createElement("span");
+  controlTitle.className = "terminal-lease-title";
+  const controlButton = document.createElement("button");
+  controlButton.type = "button";
+  control.appendChild(controlTitle);
+  control.appendChild(controlButton);
+  control.addEventListener("pointerdown", (event) => event.stopPropagation());
+  control.addEventListener("click", (event) => event.stopPropagation());
+  controlButton.addEventListener("click", () => {
+    if (terminalControl.leaseId(surfaceId) === undefined) terminalControl.takeOver(surfaceId);
+    else terminalControl.release(surfaceId);
+    applySurfaceInputPolicy(view, currentTab()?.surfaces.find((surface) => surface.id === surfaceId));
+  });
+  mount.appendChild(control);
   mount.appendChild(host);
   mount.appendChild(scrollbar);
   panel.appendChild(mount);
@@ -117,6 +138,9 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     panel,
     mount,
     host,
+    control,
+    controlTitle,
+    controlButton,
     scrollbar,
     scrollbarThumb,
     aiContainer: null,
@@ -140,6 +164,8 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     disposeCanvasPan: null,
     resizeObserver: null,
     fitQueued: false,
+    queuedGridChanges: 0,
+    measuredGrid: null,
     canvasPan: { x: 0, y: 0 },
     lastCanvasViewport: null,
     needsDefaultCanvasPan: false,
@@ -148,7 +174,8 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     initialSnapshotPending: false,
     snapshotText: null,
     opened: false,
-    pendingOutput: "",
+    pendingTerminalWrites: [],
+    bufferedOutputLength: 0,
     remoteCols: null,
     remoteRows: null,
   };
@@ -164,6 +191,12 @@ export function renderRemotePanels(): void {
   if (!panelsRoot) return;
 
   const tab = currentTab();
+  const selectedSurface = tab?.surfaces.find((surface) => surface.id === state.selectedSurfaceId) ?? tab?.surfaces[0];
+  const workspace = panelsRoot.closest(".workspace");
+  const titleInPane = selectedSurface?.terminalControl === true && selectedSurface.readOnly !== true;
+  workspace?.toggleAttribute("data-context-title", Boolean(selectedSurface && !titleInPane));
+  workspace?.toggleAttribute("data-title-in-pane", titleInPane);
+  workspace?.toggleAttribute("data-panel-selector", (tab?.surfaces.length ?? 0) > 1 && state.desktopPanelMode === "single");
   if (!tab || tab.surfaces.length === 0) {
     panelsRoot.className = "panels-stage empty";
     delete panelsRoot.dataset.mobileMode;
@@ -179,6 +212,7 @@ export function renderRemotePanels(): void {
       mobileTitleRoot.textContent = fallback;
       mobileTitleRoot.title = fallback;
     }
+    scheduleControlMeasurement();
     return;
   }
 
@@ -228,11 +262,17 @@ export function renderRemotePanels(): void {
     applySurfaceVisualZoom(view);
     if (!view.opened) {
       view.term.open(view.host);
+      mapScaledTerminalPointer(view.term, () => !view.control.hidden);
       view.opened = true;
       applySurfaceVisualZoom(view);
       syncTerminalNativeInputGuard(view);
-      view.resizeObserver = new ResizeObserver(() => scheduleFit(view));
+      view.resizeObserver = new ResizeObserver(() => {
+        scheduleFit(view);
+        scheduleControlMeasurement();
+      });
       view.resizeObserver.observe(view.host);
+      const screen = view.host.querySelector(".xterm-screen");
+      if (screen) view.resizeObserver.observe(screen);
     }
     updateSurfaceCursor(view, surface.id);
     applyInitialSnapshot(view, surface);
@@ -254,6 +294,7 @@ export function renderRemotePanels(): void {
       view.panel.remove();
     }
   }
+  scheduleControlMeasurement();
 }
 
 export function focusAndFitSelectedSurface(): void {
@@ -314,6 +355,72 @@ export function writeLegacyOutput(data: string): void {
 
 export function refitAllSurfaces(): void {
   for (const view of state.surfaceViews.values()) scheduleFit(view);
+  scheduleControlMeasurement();
+}
+
+export function applyTerminalGrid(surfaceId: string, cols: number, rows: number): void {
+  const surface = state.layoutState?.tabs.flatMap((tab) => tab.surfaces).find((entry) => entry.id === surfaceId);
+  if (!surface) return;
+  const view = ensureSurfaceView(surfaceId);
+  if (shouldBufferLiveOutputForInitialSnapshot(view)) {
+    const writes = view.pendingTerminalWrites;
+    const previous = writes.at(-1);
+    if (previous && typeof previous !== "string") writes[writes.length - 1] = { cols, rows };
+    else writes.push({ cols, rows });
+    return;
+  }
+  surface.cols = cols;
+  surface.rows = rows;
+  queueTerminalGrid(view, cols, rows);
+}
+
+function queueTerminalGrid(view: SurfaceView, cols: number, rows: number): void {
+  if (view.remoteCols === cols && view.remoteRows === rows) return;
+  view.remoteCols = cols;
+  view.remoteRows = rows;
+
+  // Preserve the order of already queued xterm writes and the host's grid change.
+  view.queuedGridChanges++;
+  view.term.write("", () => {
+    view.queuedGridChanges--;
+    if (view.term.cols !== cols || view.term.rows !== rows) view.term.resize(cols, rows);
+    placeTerminalGrid(view);
+    view.needsDefaultCanvasPan = true;
+    scheduleFit(view);
+  });
+}
+
+function scheduleControlMeasurement(): void {
+  if (controlMeasurementQueued) return;
+  controlMeasurementQueued = true;
+  requestAnimationFrame(() => {
+    controlMeasurementQueued = false;
+    const targets: TerminalControlTarget[] = [];
+    for (const surface of currentTab()?.surfaces ?? []) {
+      if (!surface.terminalControl || surface.readOnly) continue;
+      const view = state.surfaceViews.get(surface.id);
+      if (!view?.opened || !view.host.isConnected || !view.host.clientWidth || !view.host.clientHeight) continue;
+      targets.push({ surfaceId: surface.id, grid: measureControlGrid(view) });
+    }
+    terminalControl.reconcile(targets, document.visibilityState === "visible");
+  });
+}
+
+function measureControlGrid(view: SurfaceView): TerminalControlTarget["grid"] {
+  const { clientWidth: width, clientHeight: height } = view.host;
+  const dpr = window.devicePixelRatio;
+  const previous = view.measuredGrid;
+  // Xterm's measured cell size can change slightly when its grid is rounded.
+  // Actual viewport changes alone should generate another size proposal.
+  if (previous?.width === width && previous.height === height && previous.dpr === dpr) {
+    return { cols: previous.cols, rows: previous.rows };
+  }
+
+  const dimensions = view.fit.proposeDimensions();
+  if (!dimensions) return undefined;
+  const grid = supportedTerminalGrid(dimensions);
+  view.measuredGrid = { width, height, dpr, ...grid };
+  return grid;
 }
 
 export function updateSurfaceCursors(): void {
@@ -353,7 +460,7 @@ function focusSurfaceView(surfaceId: string): void {
 function ensureTerminalMount(view: SurfaceView): void {
   if (view.host.parentElement === view.mount && view.scrollbar.parentElement === view.mount) return;
   view.mount.className = "terminal-mount";
-  view.mount.replaceChildren(view.host, view.scrollbar);
+  view.mount.replaceChildren(view.control, view.host, view.scrollbar);
 }
 
 function applySurfaceVisualZoom(view: SurfaceView): void {
@@ -512,13 +619,31 @@ function updateSurfaceCursor(view: SurfaceView, surfaceId: string): void {
 }
 
 function applySurfaceInputPolicy(view: SurfaceView, surface: LayoutSurface | undefined): void {
+  const supportsLease = surface?.terminalControl === true && surface.readOnly !== true;
+  const held = surface !== undefined && terminalControl.leaseId(surface.id) !== undefined;
   view.term.options.disableStdin =
-    surface?.kind === "ai_chat" || surface?.readOnly === true || isViewModeInputBlocked();
+    surface?.kind === "ai_chat" || surface?.readOnly === true || (supportsLease && !held) || isViewModeInputBlocked();
   syncTerminalNativeInputGuard(view);
+
+  const showLease = supportsLease;
+  view.control.hidden = !showLease;
+  view.mount.toggleAttribute("data-terminal-lease", showLease);
+  if (!showLease || !surface) return;
+  const reason = terminalControl.reason(surface.id);
+  const connected = terminalControl.isAvailable();
+  const action = held ? tr("Release", "归还") : tr("Take control", "接管");
+  const title = surface.title?.trim() || tr("Terminal", "终端");
+  if (view.controlTitle.textContent !== title) {
+    view.controlTitle.textContent = title;
+    view.controlTitle.title = title;
+  }
+  if (view.controlButton.textContent !== action) view.controlButton.textContent = action;
+  view.controlButton.classList.toggle("secondary-button", held);
+  view.controlButton.disabled = !connected || reason === "unsupported";
 }
 
 function syncTerminalNativeInputGuard(view: SurfaceView): void {
-  setNativeTerminalInputBlocked(view.host, isViewModeInputBlocked(), document.activeElement);
+  setNativeTerminalInputBlocked(view.host, view.term.options.disableStdin === true || isViewModeInputBlocked(), document.activeElement);
 }
 
 function isViewModeInputBlocked(): boolean {
@@ -526,6 +651,7 @@ function isViewModeInputBlocked(): boolean {
 }
 
 function fitOrResize(view: SurfaceView): void {
+  if (view.queuedGridChanges > 0) return;
   const hasRemoteGridDimensions = view.remoteCols !== null && view.remoteRows !== null;
   const useViewportFit = shouldUseViewportFit(hasRemoteGridDimensions);
   if (!useViewportFit && view.remoteCols && view.remoteRows) {
@@ -547,11 +673,26 @@ function scheduleFit(view: SurfaceView): void {
     try {
       fitOrResize(view);
       updateCanvasPan(view);
+      placeTerminalGrid(view);
       view.term.refresh(0, Math.max(0, view.term.rows - 1));
     } catch {
       // xterm can briefly report zero-sized panels while layout is settling.
     }
   });
+}
+
+function placeTerminalGrid(view: SurfaceView): void {
+  if (view.control.hidden) return;
+  const screen = view.host.querySelector<HTMLElement>(".xterm-screen");
+  if (!screen?.offsetWidth || !screen.offsetHeight) return;
+  const viewport = view.host.getBoundingClientRect();
+  if (!viewport.width || !viewport.height) return;
+  const grid = { width: screen.offsetWidth, height: screen.offsetHeight };
+  const { y, scale } = fitTerminalCanvas(viewport, grid, isMobileRemoteShell() ? state.mobileVisualZoom : 1);
+  view.host.style.setProperty("--terminal-grid-width", `${grid.width}px`);
+  view.host.style.setProperty("--terminal-grid-height", `${grid.height}px`);
+  view.host.style.setProperty("--terminal-grid-zoom", String(scale));
+  view.host.style.setProperty("--terminal-grid-top", `${y / scale}px`);
 }
 
 function applyInitialSnapshot(view: SurfaceView, surface: LayoutSurface): void {
@@ -580,6 +721,7 @@ function applyInitialSnapshot(view: SurfaceView, surface: LayoutSurface): void {
     try {
       fitOrResize(view);
       updateCanvasPan(view);
+      placeTerminalGrid(view);
     } catch {
       // xterm can briefly report zero-sized panels while layout is settling.
     }
@@ -598,7 +740,7 @@ function writeSurfaceText(view: SurfaceView, text: string): void {
     opened: view.opened,
     initialSnapshotPending: view.initialSnapshotPending,
   })) {
-    view.pendingOutput = capPendingOutput(view.pendingOutput + text);
+    bufferLiveOutput(view, text);
     return;
   }
   flushPendingOutput(view);
@@ -609,15 +751,39 @@ function flushPendingOutput(view: SurfaceView): void {
   if (!shouldFlushBufferedOutput({
     opened: view.opened,
     initialSnapshotPending: view.initialSnapshotPending,
-    hasPendingOutput: view.pendingOutput.length > 0,
+    hasPendingOutput: view.pendingTerminalWrites.length > 0,
   })) return;
-  const pending = view.pendingOutput;
-  view.pendingOutput = "";
-  view.term.write(pending);
+  const pending = view.pendingTerminalWrites;
+  view.pendingTerminalWrites = [];
+  view.bufferedOutputLength = 0;
+  const surfaceId = view.panel.dataset.surfaceId!;
+  for (const write of pending) {
+    if (typeof write === "string") view.term.write(write);
+    else applyTerminalGrid(surfaceId, write.cols, write.rows);
+  }
 }
 
-function capPendingOutput(value: string): string {
-  return value.length > PENDING_OUTPUT_LIMIT ? value.slice(value.length - PENDING_OUTPUT_LIMIT) : value;
+function bufferLiveOutput(view: SurfaceView, text: string): void {
+  const writes = view.pendingTerminalWrites;
+  const previous = writes.at(-1);
+  if (typeof previous === "string") writes[writes.length - 1] = previous + text;
+  else writes.push(text);
+  view.bufferedOutputLength += text.length;
+  let lastDroppedGrid: { cols: number; rows: number } | undefined;
+  while (view.bufferedOutputLength > PENDING_OUTPUT_LIMIT) {
+    const first = writes[0];
+    if (typeof first !== "string") {
+      lastDroppedGrid = first;
+      writes.shift();
+      continue;
+    }
+    const excess = view.bufferedOutputLength - PENDING_OUTPUT_LIMIT;
+    const remove = Math.min(first.length, excess);
+    view.bufferedOutputLength -= remove;
+    if (remove === first.length) writes.shift();
+    else writes[0] = first.slice(remove);
+  }
+  if (lastDroppedGrid && typeof writes[0] === "string") writes.unshift(lastDroppedGrid);
 }
 
 function bindCanvasPan(view: SurfaceView): () => void {
@@ -870,7 +1036,7 @@ function updateCanvasPan(view: SurfaceView): void {
   const viewport = canvasViewportSize(view);
   const canvas = canvasContentSize(view);
   if (viewport.width <= 0 || viewport.height <= 0 || canvas.width <= 0 || canvas.height <= 0) return;
-  const bottomGutter = isMobileRemoteShell() ? MOBILE_CANVAS_BOTTOM_GUTTER : 0;
+  const bottomGutter = terminalCanvasBottomGutter(view, isMobileRemoteShell());
   if (view.needsDefaultCanvasPan) {
     view.canvasPan = defaultCanvasPan(viewport, canvas, { bottomGutter });
     view.needsDefaultCanvasPan = false;
@@ -906,7 +1072,7 @@ function updateCanvasScrollbar(
   view: SurfaceView,
   viewport: CanvasSize = canvasViewportSize(view),
   canvas: CanvasSize = canvasContentSize(view),
-  bottomGutter: number = isMobileRemoteShell() ? MOBILE_CANVAS_BOTTOM_GUTTER : 0,
+  bottomGutter: number = terminalCanvasBottomGutter(view, isMobileRemoteShell()),
 ): void {
   const hasRemoteGridDimensions = view.remoteCols !== null && view.remoteRows !== null;
   const mobile = isMobileRemoteShell();
@@ -948,7 +1114,12 @@ function canvasViewportSize(view: SurfaceView): CanvasSize {
   };
 }
 
+function terminalCanvasBottomGutter(view: SurfaceView, mobile: boolean): number {
+  return mobile && view.control.hidden ? MOBILE_CANVAS_BOTTOM_GUTTER : 0;
+}
+
 function canvasContentSize(view: SurfaceView): CanvasSize {
+  if (!view.control.hidden) return canvasViewportSize(view);
   const screen = view.host.querySelector<HTMLElement>(".xterm-screen");
   const xterm = view.host.querySelector<HTMLElement>(".xterm");
   const terminalHeight = terminalCanvasHeight(view, screen);

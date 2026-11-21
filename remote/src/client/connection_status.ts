@@ -84,6 +84,13 @@ export function connectionStatusMeasuringLatency(): ConnectionStatus {
   };
 }
 
+export function connectionHeaderLabel(status: ConnectionStatus): string {
+  if (status.desktop === "online") {
+    return status.latencyMs === null ? "— ms" : `${status.latencyMs} ms`;
+  }
+  return status.kind === "connecting" ? tr("Linking", "连接中") : tr("Offline", "未连接");
+}
+
 export function latencyDisclosureText(latencyMs: number | null): string {
   if (latencyMs === null) return tr("Latency unavailable", "暂无延迟数据");
   return tr(`Latency: ${normalizeLatency(latencyMs)} ms`, `延迟 ${normalizeLatency(latencyMs)} ms`);

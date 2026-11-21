@@ -5758,10 +5758,17 @@ threadlocal var g_resize_throttle: resize_throttle.ResizeThrottle = .{};
 
 fn onPlatformResize(width: i32, height: i32) void {
     if (width <= 0 or height <= 0) return;
+    noteRemoteTerminalWindowSize(width, height);
     const now = std.time.milliTimestamp();
     if (!g_resize_throttle.shouldRender(now)) return;
     g_resize_throttle.noteRendered(now);
     renderResizeFrame(width, height);
+}
+
+fn noteRemoteTerminalWindowSize(width: i32, height: i32) void {
+    const host = remoteSyncHost();
+    if (host.hub == null or !host.state.remote.observeWindowSize(width, height)) return;
+    split_layout.updateRemoteWindowGeometry(width, height);
 }
 
 fn renderResizeFrame(width: i32, height: i32) void {
@@ -7218,8 +7225,7 @@ pub fn toggleQuakeVisibility() void {
         _ = window_backend.showVisible(win);
         _ = window_backend.setForeground(win);
         g_quake_hidden = false;
-        g_force_rebuild = true;
-        g_cells_valid = false;
+        applyUiEffect(.{ .needs_rebuild = true, .cells_invalid = true });
     } else {
         rememberQuakeFrame(win);
         window_backend.clearTransientInput(win);
@@ -8835,6 +8841,7 @@ fn runMainLoop(self: *AppWindow) !void {
         const fb = window_backend.framebufferSize(win);
         const fb_width: c_int = fb.width;
         const fb_height: c_int = fb.height;
+        remote_sync.syncPendingGridLayout(remoteSyncHost(), allocator);
         if (window_backend.isMinimized(win) or fb_width <= 0 or fb_height <= 0) {
             agent_requests.failPendingUiScreenshots(error.WindowUnavailable);
             const timeout_ms = render_gate.computeBlockTimeoutMs(.{
@@ -8845,6 +8852,7 @@ fn runMainLoop(self: *AppWindow) !void {
             window_backend.pumpAppEvents(@as(f64, @floatFromInt(timeout_ms)) / 1000.0);
             continue;
         }
+        noteRemoteTerminalWindowSize(fb_width, fb_height);
         syncBackendSurfaceSize(fb_width, fb_height);
 
         const gate_now = std.time.milliTimestamp();

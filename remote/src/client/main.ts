@@ -3,9 +3,10 @@ import "./styles.css";
 
 import { initializeLocale } from "./i18n";
 
-import { setSurfaceInputHandler } from "./surfaces";
+import { refitAllSurfaces, setSurfaceInputHandler } from "./surfaces";
 import { kickReconnectIfIdle, loadMe, sendInputBytes, setTransportHooks } from "./transport";
 import { setMobileTextInputSender } from "./mobile_text_input";
+import { terminalControl } from "./terminal_control";
 import { setVirtualKeyboardSender } from "./vkbd";
 import {
   renderConsole,
@@ -32,8 +33,13 @@ setTransportHooks({
 });
 
 window.addEventListener("online", kickReconnectIfIdle);
+window.addEventListener("pagehide", () => terminalControl.reconcile([], false));
+window.addEventListener("pageshow", refitAllSurfaces);
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") kickReconnectIfIdle();
+  if (document.visibilityState === "visible") {
+    kickReconnectIfIdle();
+    refitAllSurfaces();
+  }
 });
 
 void loadMe().then((me) => {

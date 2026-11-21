@@ -12,11 +12,13 @@ pub const Message = union(enum) {
     pub const WriteSmall = struct {
         data: [WRITE_SMALL_MAX]u8 = undefined,
         len: u16 = 0,
+        input_epoch: ?u64 = null,
     };
 
     pub const WriteAlloc = struct {
         allocator: std.mem.Allocator,
         data: []u8,
+        input_epoch: ?u64 = null,
     };
 
     /// Resize the terminal grid to the given dimensions.
@@ -34,14 +36,18 @@ pub const Message = union(enum) {
     write_alloc: WriteAlloc,
 
     pub fn writeReq(allocator: std.mem.Allocator, data: []const u8) !Message {
+        return writeReqWithEpoch(allocator, data, null);
+    }
+
+    pub fn writeReqWithEpoch(allocator: std.mem.Allocator, data: []const u8, input_epoch: ?u64) !Message {
         if (data.len <= WRITE_SMALL_MAX) {
-            var small: WriteSmall = .{ .len = @intCast(data.len) };
+            var small: WriteSmall = .{ .len = @intCast(data.len), .input_epoch = input_epoch };
             @memcpy(small.data[0..data.len], data);
             return .{ .write_small = small };
         }
 
         const owned = try allocator.dupe(u8, data);
-        return .{ .write_alloc = .{ .allocator = allocator, .data = owned } };
+        return .{ .write_alloc = .{ .allocator = allocator, .data = owned, .input_epoch = input_epoch } };
     }
 
     pub fn deinit(self: Message) void {

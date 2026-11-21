@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   HIGH_LATENCY_THRESHOLD_MS,
+  connectionHeaderLabel,
   connectionStatusConnecting,
   connectionStatusForLatency,
   connectionStatusMeasuringLatency,
@@ -77,4 +78,12 @@ test("link status remains accurate before peer confirmation and latency measurem
 test("latency disclosure rounds measurements for click feedback", () => {
   assert.equal(latencyDisclosureText(null), "Latency unavailable");
   assert.equal(latencyDisclosureText(123.6), "Latency: 124 ms");
+});
+
+test("the header shows measured latency while keeping offline and pending states distinct", () => {
+  assert.equal(connectionHeaderLabel(connectionStatusForLatency(4)), "4 ms");
+  assert.equal(connectionHeaderLabel(connectionStatusForLatency(501)), "501 ms");
+  assert.equal(connectionHeaderLabel(connectionStatusMeasuringLatency()), "— ms");
+  assert.equal(connectionHeaderLabel(connectionStatusWaitingForDesktop()), "Linking");
+  assert.equal(connectionHeaderLabel(connectionStatusWithoutPeer(42)), "Offline");
 });

@@ -73,6 +73,16 @@ export const CANVAS_WHEEL_EVENT_OPTIONS: AddEventListenerOptions = {
 
 const BOTTOM_ANCHOR_EPSILON = 24;
 
+export function fitTerminalCanvas(viewport: CanvasSize, grid: CanvasSize, zoom: number): { scale: number; y: number } {
+  const widthScale = viewport.width / grid.width;
+  const heightScale = viewport.height / grid.height;
+  const scale = Math.min(widthScale, heightScale) * zoom;
+  return {
+    scale,
+    y: widthScale <= heightScale ? 0 : Math.max(0, (viewport.height - grid.height * scale) / 2),
+  };
+}
+
 export function clampCanvasPan(
   pan: CanvasPoint,
   viewport: CanvasSize,

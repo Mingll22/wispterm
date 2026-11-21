@@ -32,7 +32,7 @@ test("terminal panels do not reserve redundant per-panel headers", async () => {
 
   assert.match(panelRule, /grid-template-rows:\s*minmax\(0,\s*1fr\)\s*;/);
   assert.doesNotMatch(css, /\.panel-copy\b/);
-  assert.match(mountRule, /border-radius:\s*var\(--radius\)\s*;/);
+  assert.match(mountRule, /border-radius:\s*var\(--radius-floating\)\s*;/);
 });
 
 test("mobile view mode keeps drag handling while allowing native terminal text selection", async () => {
@@ -51,26 +51,17 @@ test("mobile view mode keeps drag handling while allowing native terminal text s
   assert.match(xtermRule, /-webkit-user-select:\s*text\s*;/);
 });
 
-test("mobile top bar uses compact status controls instead of large mode buttons", async () => {
+test("mobile toolbar groups input actions and leaves display scale in settings", async () => {
   const css = await readFile(responsiveCssUrl, "utf8");
   const markup = await readFile(consoleViewUrl, "utf8");
   const barRule = declarationsForSelector(css, ".mobile-bar").join("\n");
-  const controlsRule = declarationsForSelector(css, ".mobile-chrome-controls").join("\n");
-  const modeRule = declarationsForSelector(css, ".mobile-input-mode-toggle").join("\n");
-  const zoomRule = declarationsForSelector(css, ".mobile-zoom-toggle").join("\n");
-  const keyboardRule = declarationsForSelector(css, ".mobile-keyboard-toggle").join("\n");
+  const actionsRule = declarationsForSelector(css, ".mobile-terminal-actions").join("\n");
 
-  assert.match(markup, /class="mobile-chrome-controls"/);
-  assert.match(markup, /mobileInputModeLabel/);
-  assert.match(markup, /mobileVisualZoomCompactLabel/);
-  assert.match(markup, /id="kbd-toggle"[\s\S]*>\s*\$\{tr\("Keys", "快捷键"\)\}\s*<\/button>/);
+  assert.match(markup, /class="mobile-terminal-actions"[^>]*>[\s\S]*id="mobile-input-mode-toggle"[\s\S]*id="kbd-toggle"/);
+  assert.match(markup, /id="mobile-terminal-scale"[\s\S]*MOBILE_VISUAL_ZOOM_LEVELS\.map/);
+  assert.doesNotMatch(markup, /id="mobile-zoom-toggle"/);
   assert.match(barRule, /grid-template-columns:\s*40px\s+minmax\(0,\s*1fr\)\s+auto\s*;/);
-  assert.doesNotMatch(barRule, /52px|58px/);
-  assert.match(controlsRule, /display:\s*flex\s*;/);
-  for (const rule of [modeRule, zoomRule, keyboardRule]) {
-    assert.match(rule, /height:\s*36px\s*;/);
-    assert.doesNotMatch(rule, /height:\s*42px\s*;/);
-  }
+  assert.match(actionsRule, /display:\s*flex\s*;/);
 });
 
 test("status lights expose clickable red green and yellow latency states", async () => {
@@ -145,20 +136,15 @@ test("mobile surface menu uses an opaque layer over terminal content", async () 
   assert.doesNotMatch(menuRule, /surface-overlay/);
 });
 
-test("mobile surface dropdown stays right-aligned near the chrome controls", async () => {
+test("mobile surface dropdown opens under its own selector within the viewport gutters", async () => {
   const css = await readFile(responsiveCssUrl, "utf8");
   const selectorRule = declarationsForSelector(css, ".mobile-surface-selector").join("\n");
-  const collapsedSelectorRule = declarationsForSelector(
-    css,
-    '.mobile-surface-selector[data-collapsed="true"]',
-  ).join("\n");
   const menuRule = declarationsForSelector(css, ".mobile-surface-menu").join("\n");
 
   assert.match(selectorRule, /display:\s*flex\s*;/);
   assert.match(selectorRule, /justify-content:\s*flex-start\s*;/);
-  assert.match(collapsedSelectorRule, /justify-content:\s*flex-end\s*;/);
-  assert.match(menuRule, /right:\s*0\s*;/);
-  assert.match(menuRule, /left:\s*auto\s*;/);
+  assert.match(menuRule, /inset-inline-start:\s*0\s*;/);
+  assert.match(menuRule, /width:\s*min\(.*calc\(100vw\s*-\s*\d+px\)\)\s*;/);
 });
 
 test("mobile canvas scrollbar is anchored to the viewport during visual zoom", async () => {

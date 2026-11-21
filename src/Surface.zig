@@ -19,6 +19,9 @@ const termio = @import("termio.zig");
 const Config = @import("config.zig");
 const Renderer = @import("renderer/Renderer.zig");
 const RemoteHub = @import("remote_hub.zig");
+const remote_control = @import("remote_terminal_control.zig");
+const GridSize = @import("core/geometry.zig").GridSize;
+const remote_transport = @import("platform/remote_transport.zig");
 const threading = @import("platform/threading.zig");
 const agent_detector = @import("terminal_agents/detector.zig");
 const live_transcript = @import("terminal_agents/live_transcript.zig");
@@ -197,12 +200,12 @@ pub const VtHandler = struct {
 
     /// Forward a terminal-generated response (Kitty keyboard query, DSR, mode
     /// reports, …) to the PTY. Invoked on the IO reader thread while parsing
-    /// output; `queuePtyWrite` copies the bytes and hands them to the IO writer
+    /// output; the mailbox copies the bytes and hands them to the IO writer
     /// thread, so this is safe from here. The owning Surface is recovered from
     /// the handler's terminal pointer, which aliases `&surface.terminal`.
     fn writePtyResponse(handler: *InnerHandler, data: [:0]const u8) void {
         const surface: *Surface = @fieldParentPtr("terminal", handler.terminal);
-        surface.queuePtyWrite(data) catch |err| mailbox_log.warn(
+        surface.queuePtyWriteImpl(data, null) catch |err| mailbox_log.warn(
             "dropped terminal query reply ({d} bytes): {s}",
             .{ data.len, @errorName(err) },
         );
@@ -278,8 +281,19 @@ render_state: renderer.State,
 launch_kind: LaunchKind,
 advertise_terminal_capabilities: bool,
 ssh_connection: ?SshConnection,
-remote_hub: ?*RemoteHub.Hub,
+remote_hub: std.atomic.Value(?*RemoteHub.Hub) = .init(null),
 remote_id: [16]u8,
+
+/// The desktop layout asks for a natural grid; a live lease may override it.
+/// The IO writer alone publishes the confirmed grid under the render lock.
+remote_terminal: struct {
+    mutex: std.Thread.Mutex = .{},
+    enabled: bool = false,
+    clock: std.time.Timer = undefined,
+    state: remote_control.State = .{},
+    desktop_layout: ?DesktopLayout = null,
+} = .{},
+confirmed_grid: std.atomic.Value(u32) = .init(packGrid(.{})),
 
 /// The command + cwd this surface was launched with, owned copies kept so the
 /// panel can be re-run in place after its process exits (Enter-to-reconnect).
@@ -546,7 +560,7 @@ pub fn init(
     try surface.command.start(&surface.pty, shell_cmd, cwd, advertise_terminal_capabilities);
     errdefer surface.command.deinit();
 
-    const ready = try finishInit(surface, allocator, cols, rows, platform_pty_command.launchKindForCommand(shell_cmd), cwd, advertise_terminal_capabilities);
+    const ready = try finishInit(surface, allocator, cols, rows, platform_pty_command.launchKindForCommand(shell_cmd), cwd, advertise_terminal_capabilities, false);
     ready.setRespawnTarget(allocator, shell_cmd, cwd);
     return ready;
 }
@@ -579,6 +593,7 @@ fn finishInit(
     launch_kind: LaunchKind,
     cwd: platform_pty_command.Cwd,
     advertise_terminal_capabilities: bool,
+    is_virtual: bool,
 ) !*Surface {
     // Init remaining fields
     surface.allocator = allocator;
@@ -591,8 +606,15 @@ fn finishInit(
     surface.ssh_autofill_deadline_ms = 0;
     surface.respawn_command = null;
     surface.respawn_cwd = null;
-    surface.remote_hub = null;
     RemoteHub.nextSurfaceId(&surface.remote_id);
+    surface.remote_terminal.state.desktop_grid = .{ .cols = cols, .rows = rows };
+    surface.confirmed_grid.store(packGrid(.{ .cols = cols, .rows = rows }), .release);
+    if (!is_virtual and remote_transport.backendForOs(builtin.os.tag) != .unsupported) {
+        if (std.time.Timer.start()) |clock| {
+            surface.remote_terminal.clock = clock;
+            surface.remote_terminal.enabled = true;
+        } else |_| {}
+    }
     surface.vt_stream = surface.initVtStream();
     errdefer surface.vt_stream.deinit();
     surface.dirty = std.atomic.Value(bool).init(true);
@@ -755,7 +777,8 @@ pub fn initVirtual(
     surface.command = .{};
     errdefer surface.command.deinit();
 
-    return finishInit(surface, allocator, cols, rows, .ssh, null, false);
+    // A virtual tmux pane has no independent underlying PTY to resize.
+    return finishInit(surface, allocator, cols, rows, .ssh, null, false, true);
 }
 
 /// Deinitialize and free a Surface.
@@ -770,7 +793,7 @@ pub fn deinit(self: *Surface, allocator: std.mem.Allocator) void {
     // 1. Release renderer-owned CPU buffers.
     self.surface_renderer.deinit();
 
-    if (self.remote_hub) |hub| {
+    if (self.remote_hub.load(.acquire)) |hub| {
         hub.unregisterSurface(self.remote_id);
     }
 
@@ -795,7 +818,7 @@ pub fn deinit(self: *Surface, allocator: std.mem.Allocator) void {
         self.io_reader_thread = null;
     }
     self.markStopped();
-    self.remote_hub = null;
+    self.remote_hub.store(null, .release);
 
     // Clean up writer thread state and mailbox
     if (self.io_thread_state) |state| {
@@ -947,6 +970,7 @@ pub fn markExited(self: *Surface, reason: ExitReason, status: ?Command.Exit) voi
 
     if (!should_notify) return;
     io_log.info("surface io exited reason={s}", .{@tagName(reason)});
+    self.releaseRemoteControl(.released, .immediate);
     self.requestWriterStop();
     self.paintIoStatus(.{ .exited = info });
     window_backend.postWakeup();
@@ -972,6 +996,7 @@ pub fn failIo(self: *Surface, operation: Operation, err: anyerror) void {
     self.io_state_mutex.unlock();
 
     if (!should_notify) return;
+    self.releaseRemoteControl(.released, .immediate);
     if (builtin.is_test) {
         io_log.warn("surface io failed operation={s} err={s}", .{ @tagName(operation), @errorName(err) });
     } else {
@@ -1055,8 +1080,9 @@ pub fn respawn(self: *Surface) void {
     const cmd = platform_pty_command.commandLineFromOwned(owned_cmd);
     const cwd: platform_pty_command.Cwd =
         if (self.respawn_cwd) |c| platform_pty_command.cwdFromOwned(c) else null;
-    const cols = self.size.grid.cols;
-    const rows = self.size.grid.rows;
+    const desktop_grid = self.desktopGrid();
+    const cols = desktop_grid.cols;
+    const rows = desktop_grid.rows;
 
     // Both IO threads already returned (reader on EOF, writer on the stop
     // notify markExited sent) but were never joined. Collect them before
@@ -1128,6 +1154,7 @@ pub fn respawn(self: *Surface) void {
         self.render_state.mutex.lock();
         defer self.render_state.mutex.unlock();
         self.terminal.resize(self.allocator, cols, rows) catch {};
+        self.commitTerminalGridLocked(.{ .cols = self.terminal.cols, .rows = self.terminal.rows });
         self.vt_stream.nextSlice("\x1b[2J\x1b[H");
         self.terminal.printString("[WispTerm] Reconnecting...\r\n") catch {};
         self.clearSynchronizedOutputLocked();
@@ -1181,65 +1208,163 @@ pub const ResizePolicy = enum {
     immediate,
 };
 
-/// Update the surface size and queue a resize to the IO thread if needed.
-/// This is called by the split layout computation to set each surface
-/// to its correct dimensions based on the split geometry.
-///
-/// The main thread updates pixel/grid dimensions in surface.size (needed
-/// for layout/rendering), but the actual PTY + terminal resize happens
-/// on the IO thread via queueIo() with 25ms coalescing.
-///
-/// Returns true if the grid dimensions changed (resize was queued).
-pub fn setScreenSizeWithPolicy(
-    self: *Surface,
-    screen_width: u32,
-    screen_height: u32,
+pub const DesktopLayout = struct {
+    width: u32,
+    height: u32,
     cell_width: f32,
     cell_height: f32,
-    explicit_padding: renderer.size.Padding,
+    padding: renderer.size.Padding,
+    // Preserve split geometry before cell or pixel rounding, so a real
+    // boundary adjustment still reclaims ownership at the same cell count.
+    split: [4]f32,
+    content_size: [2]i32,
+};
+
+/// Update native layout intent. Remote grid commits do not change this input.
+pub fn setScreenSizeWithPolicy(
+    self: *Surface,
+    layout: DesktopLayout,
     resize_policy: ResizePolicy,
 ) bool {
-    // Update screen size
-    self.size.screen.width = screen_width;
-    self.size.screen.height = screen_height;
-    self.size.cell.width = cell_width;
-    self.size.cell.height = cell_height;
+    self.remote_terminal.mutex.lock();
+    defer self.remote_terminal.mutex.unlock();
+    const state = &self.remote_terminal.state;
+    const previous_desktop = state.desktop_grid;
+    const previous_target = state.targetGrid();
+    const geometry_changed = if (self.remote_terminal.desktop_layout) |previous| !std.meta.eql(previous, layout) else false;
+    self.remote_terminal.desktop_layout = layout;
 
-    // Store explicit padding (used for rendering offset)
-    self.size.padding = explicit_padding;
+    self.size.screen = .{ .width = layout.width, .height = layout.height };
+    self.size.cell.width = layout.cell_width;
+    self.size.cell.height = layout.cell_height;
+    self.size.padding = layout.padding;
+    self.size.computeGrid();
+    state.desktop_grid = self.size.grid;
+    if (geometry_changed and state.reclaim()) self.publishControlStateLocked(.desktop);
 
-    // Compute grid size from available space (screen minus padding)
-    const avail_width = screen_width -| explicit_padding.left -| explicit_padding.right;
-    const avail_height = screen_height -| explicit_padding.top -| explicit_padding.bottom;
+    const target = state.targetGrid();
+    if (!remote_control.sameGrid(previous_target, target)) self.queueGrid(target, resize_policy);
+    // Keep native mouse/selection geometry aligned with the remotely sized VT.
+    if (state.holder != null) self.size.grid = self.confirmedGrid();
+    return !remote_control.sameGrid(previous_desktop, state.desktop_grid);
+}
 
-    const new_cols: u16 = if (avail_width > 0 and cell_width > 0)
-        @intFromFloat(@max(1, @as(f32, @floatFromInt(avail_width)) / cell_width))
-    else
-        1;
-    const new_rows: u16 = if (avail_height > 0 and cell_height > 0)
-        @intFromFloat(@max(1, @as(f32, @floatFromInt(avail_height)) / cell_height))
-    else
-        1;
+fn desktopGrid(self: *Surface) GridSize {
+    self.remote_terminal.mutex.lock();
+    defer self.remote_terminal.mutex.unlock();
+    return self.remote_terminal.state.desktop_grid;
+}
 
-    const changed = (self.size.grid.cols != new_cols or self.size.grid.rows != new_rows);
-    self.size.grid.cols = new_cols;
-    self.size.grid.rows = new_rows;
+fn packGrid(grid: GridSize) u32 {
+    return @as(u32, grid.cols) << 16 | grid.rows;
+}
 
-    // Queue resize to IO thread if grid dimensions changed
-    if (changed) {
-        // Terminal rows/cols and pixel dimensions are updated together in
-        // the IO thread, under the render-state lock.
-        const grid: renderer.size.GridSize = .{ .cols = new_cols, .rows = new_rows };
-        // queueIo stores the resize on the mailbox's infallible control lane;
-        // a grid change always triggers a UI rebuild regardless of IO state.
-        switch (resize_policy) {
-            .coalesced => self.queueIo(.{ .resize = grid }),
-            .immediate => self.queueIo(.{ .resize_immediate = grid }),
-        }
-        return true;
+pub fn confirmedGrid(self: *const Surface) GridSize {
+    const packed_grid = self.confirmed_grid.load(.acquire);
+    return .{ .cols = @intCast(packed_grid >> 16), .rows = @truncate(packed_grid) };
+}
+
+pub const ResizePixels = struct { width: u32, height: u32 };
+
+/// Recheck the coalesced request before admitting it to the PTY. A takeover,
+/// desktop resize or expiration may have invalidated it while queued.
+pub fn prepareResize(self: *Surface, grid: GridSize) ?ResizePixels {
+    self.remote_terminal.mutex.lock();
+    defer self.remote_terminal.mutex.unlock();
+    if (self.remote_terminal.enabled) self.expireRemoteControlLocked();
+    if (!remote_control.sameGrid(self.remote_terminal.state.targetGrid(), grid) or
+        remote_control.sameGrid(self.confirmedGrid(), grid)) return null;
+    return .{
+        .width = @intFromFloat(@as(f32, @floatFromInt(grid.cols)) * self.size.cell.width),
+        .height = @intFromFloat(@as(f32, @floatFromInt(grid.rows)) * self.size.cell.height),
+    };
+}
+
+/// Caller holds the render lock so the reader cannot send post-resize bytes
+/// before the authoritative grid is enqueued on the same transport.
+pub fn commitTerminalGridLocked(self: *Surface, grid: GridSize) void {
+    if (self.confirmed_grid.swap(packGrid(grid), .acq_rel) == packGrid(grid)) return;
+    if (!self.remote_terminal.enabled) return;
+    if (self.remote_hub.load(.acquire)) |hub| hub.sendTerminalGrid(&self.remote_id, grid);
+}
+
+pub fn supportsRemoteControl(self: *Surface) bool {
+    return self.remote_terminal.enabled and self.acceptsInput();
+}
+
+pub fn remoteControlActive(self: *Surface) bool {
+    if (!self.remote_terminal.enabled) return false;
+    self.remote_terminal.mutex.lock();
+    defer self.remote_terminal.mutex.unlock();
+    return self.remote_terminal.state.holder != null;
+}
+
+fn queueGrid(self: *Surface, grid: GridSize, policy: ResizePolicy) void {
+    self.queueIo(switch (policy) {
+        .coalesced => .{ .resize = grid },
+        .immediate => .{ .resize_immediate = grid },
+    });
+}
+
+fn publishControlStateLocked(self: *Surface, reason: remote_control.Reason) void {
+    if (self.remote_hub.load(.acquire)) |hub| {
+        const holder = if (self.remote_terminal.state.holder) |*holder| holder else null;
+        hub.sendTerminalControlState(&self.remote_id, holder, reason);
     }
+}
 
-    return false;
+fn releaseRemoteControl(self: *Surface, reason: remote_control.Reason, policy: ResizePolicy) void {
+    if (!self.remote_terminal.enabled) return;
+    self.remote_terminal.mutex.lock();
+    defer self.remote_terminal.mutex.unlock();
+    if (self.remote_terminal.state.reclaim()) {
+        self.queueGrid(self.remote_terminal.state.desktop_grid, policy);
+        self.publishControlStateLocked(reason);
+    }
+}
+
+pub fn reclaimRemoteControl(self: *Surface) void {
+    self.releaseRemoteControl(.desktop, .coalesced);
+}
+
+fn expireRemoteControlLocked(self: *Surface) void {
+    if (self.remote_terminal.state.expire(self.remote_terminal.clock.read() / std.time.ns_per_ms)) {
+        self.queueGrid(self.remote_terminal.state.desktop_grid, .immediate);
+        self.publishControlStateLocked(.expired);
+    }
+}
+
+/// The termio xev timer wakes at the deadline even when the terminal is idle.
+pub fn remoteControlRemainingMs(self: *Surface) ?u64 {
+    if (!self.remote_terminal.enabled) return null;
+    self.remote_terminal.mutex.lock();
+    defer self.remote_terminal.mutex.unlock();
+    self.expireRemoteControlLocked();
+    const holder = self.remote_terminal.state.holder orelse return null;
+    const now_ms = self.remote_terminal.clock.read() / std.time.ns_per_ms;
+    return @max(1, holder.expires_at_ms -| now_ms);
+}
+
+fn remoteControlRequest(ctx: *anyopaque, request: remote_control.Request) void {
+    const self: *Surface = @ptrCast(@alignCast(ctx));
+    self.remote_terminal.mutex.lock();
+    defer self.remote_terminal.mutex.unlock();
+    if (!self.acceptsInput()) {
+        _ = self.remote_terminal.state.reclaim();
+        self.publishControlStateLocked(.unsupported);
+        return;
+    }
+    self.expireRemoteControlLocked();
+    const state = &self.remote_terminal.state;
+    const previous = state.targetGrid();
+    const reason = state.apply(request, self.confirmedGrid(), self.remote_terminal.clock.read() / std.time.ns_per_ms);
+    const target = state.targetGrid();
+    if (!remote_control.sameGrid(previous, target)) {
+        self.queueGrid(target, if (state.holder == null) .immediate else .coalesced);
+    }
+    if (reason) |value| self.publishControlStateLocked(value);
+    // A grant or renewal with unchanged dimensions still needs the timer.
+    if (state.holder != null) self.mailbox.notify();
 }
 
 /// Number of notify+yield attempts to give the writer thread a chance to drain
@@ -1255,6 +1380,8 @@ pub const QueueWriteError = error{
     /// The owning surface is no longer accepting input (stopping/exited/failed);
     /// the PTY process is gone and the IO writer thread is tearing down.
     SurfaceExited,
+    /// A remote controller owns the surface or this input's lease is stale.
+    RemoteControlActive,
     /// The payload ring stayed full across the bounded notify+retry window;
     /// the write was NOT delivered and NOT dropped behind the caller's back.
     BackpressureTimeout,
@@ -1286,9 +1413,32 @@ pub fn queueIo(self: *Surface, msg: termio.Message) void {
 /// success — the caller decides how loud to be. We NEVER use msg.deinit() to
 /// implicitly mean "delivered".
 pub fn queuePtyWrite(self: *Surface, data: []const u8) QueueWriteError!void {
-    if (!self.acceptsInput()) return error.SurfaceExited;
+    return self.queueControlledWrite(data, .{});
+}
 
-    const msg = termio.Message.writeReq(self.allocator, data) catch
+fn queueControlledWrite(self: *Surface, data: []const u8, identity: remote_control.Identity) QueueWriteError!void {
+    if (!self.acceptsInput()) return error.SurfaceExited;
+    const epoch: ?u64 = if (self.remote_terminal.enabled) blk: {
+        self.remote_terminal.mutex.lock();
+        defer self.remote_terminal.mutex.unlock();
+        self.expireRemoteControlLocked();
+        break :blk self.remote_terminal.state.authorize(identity) orelse return error.RemoteControlActive;
+    } else null;
+    return self.queuePtyWriteImpl(data, epoch);
+}
+
+pub fn admitPtyWrite(self: *Surface, epoch: ?u64) bool {
+    if (!self.acceptsInput()) return false;
+    const authorized_epoch = epoch orelse return true;
+    self.remote_terminal.mutex.lock();
+    defer self.remote_terminal.mutex.unlock();
+    self.expireRemoteControlLocked();
+    return self.remote_terminal.state.input_epoch == authorized_epoch;
+}
+
+fn queuePtyWriteImpl(self: *Surface, data: []const u8, epoch: ?u64) QueueWriteError!void {
+    if (!self.acceptsInput()) return error.SurfaceExited;
+    const msg = termio.Message.writeReqWithEpoch(self.allocator, data, epoch) catch
         return error.OutOfMemory;
 
     var attempt: usize = 0;
@@ -1317,18 +1467,18 @@ pub fn queuePtyWrite(self: *Surface, data: []const u8) QueueWriteError!void {
 }
 
 pub fn attachRemoteHub(self: *Surface, hub: ?*RemoteHub.Hub) void {
-    self.remote_hub = hub;
+    self.remote_hub.store(hub, .release);
     if (hub) |h| {
-        h.registerSurface(self.remote_id, self, remoteWrite);
+        h.registerTerminalSurface(self.remote_id, self, remoteWrite, if (self.remote_terminal.enabled) remoteControlRequest else null);
     }
 }
 
-fn remoteWrite(ctx: *anyopaque, data: []const u8) void {
+fn remoteWrite(ctx: *anyopaque, data: []const u8, identity: remote_control.Identity) void {
     const surface: *Surface = @ptrCast(@alignCast(ctx));
-    surface.queuePtyWrite(data) catch |err| mailbox_log.warn(
-        "dropped remote write ({d} bytes): {s}",
-        .{ data.len, @errorName(err) },
-    );
+    surface.queueControlledWrite(data, identity) catch |err| {
+        if (err == error.RemoteControlActive) return;
+        mailbox_log.warn("dropped remote write ({d} bytes): {s}", .{ data.len, @errorName(err) });
+    };
 }
 
 /// Get the padding for rendering. Returns the computed padding
@@ -1406,15 +1556,9 @@ pub fn agentDetectionShared(self: *const Surface) agent_detector.Detection {
     return agent_detector.Detection.unpack(self.agent_detection_shared.load(.acquire));
 }
 
-/// Queue a command into the existing PTY mailbox. This is used only during
-/// startup restore, before the shell/remote login is ready to read it.
+/// Queue a host command for session restore or graceful close.
 pub fn queueInput(self: *Surface, data: []const u8) bool {
-    const msg = termio.Message.writeReq(self.allocator, data) catch return false;
-    if (self.mailbox.sendWrite(msg) == .full) {
-        msg.deinit();
-        return false;
-    }
-    self.mailbox.notify();
+    self.queuePtyWrite(data) catch return false;
     return true;
 }
 
@@ -2100,6 +2244,7 @@ test "XTVERSION query reports WispTerm and its version" {
 // outcome contract. io_state must be .running for writes to be accepted.
 fn writeOutcomeHarness(surface: *Surface) !void {
     surface.allocator = std.testing.allocator;
+    surface.remote_terminal = .{};
     surface.mailbox = try termio.Mailbox.init();
     surface.exited = std.atomic.Value(bool).init(false);
     surface.io_state_mutex = .{};
@@ -2159,8 +2304,47 @@ test "queuePtyWrite enqueues a write onto the payload ring on success" {
     }
 }
 
+test "native geometry reclaims an unchanged cell grid and drops stale leased input" {
+    var surface: Surface = undefined;
+    try writeOutcomeHarness(&surface);
+    defer writeOutcomeHarnessDeinit(&surface);
+    surface.remote_hub = .init(null);
+    surface.confirmed_grid = .init(packGrid(.{}));
+    surface.size = .{};
+    surface.remote_terminal.enabled = true;
+    surface.remote_terminal.clock = try std.time.Timer.start();
+
+    var layout: DesktopLayout = .{
+        .width = 800,
+        .height = 480,
+        .cell_width = 10,
+        .cell_height = 20,
+        .padding = .{},
+        .split = .{ 0, 0, 1, 1 },
+        .content_size = .{ 800, 480 },
+    };
+    try std.testing.expect(!surface.setScreenSizeWithPolicy(layout, .coalesced));
+    remoteControlRequest(&surface, .{ .client_id = "phone", .action = .acquire });
+    const identity: remote_control.Identity = .{ .client_id = "phone", .lease_id = surface.remote_terminal.state.holder.?.id };
+    try surface.queueControlledWrite("queued", identity);
+    try std.testing.expectError(error.RemoteControlActive, surface.queuePtyWrite("desktop"));
+    try std.testing.expect(!surface.setScreenSizeWithPolicy(layout, .coalesced));
+    try std.testing.expect(surface.remoteControlActive());
+
+    layout.width += 1;
+    try std.testing.expect(!surface.setScreenSizeWithPolicy(layout, .coalesced));
+    try std.testing.expect(!surface.remoteControlActive());
+    try std.testing.expectError(error.RemoteControlActive, surface.queueControlledWrite("stale", identity));
+    const queued = surface.mailbox.popWrite() orelse return error.MissingLeasedWrite;
+    defer queued.deinit();
+    try std.testing.expect(!surface.admitPtyWrite(queued.write_small.input_epoch));
+    try std.testing.expect(surface.prepareResize(.{}) == null);
+    try surface.queuePtyWrite("desktop");
+}
+
 fn ioStateHarness(surface: *Surface) !void {
     surface.allocator = std.testing.allocator;
+    surface.remote_terminal = .{};
     surface.terminal = try ghostty_vt.Terminal.init(std.testing.allocator, .{
         .cols = 80,
         .rows = 24,

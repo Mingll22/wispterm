@@ -2332,8 +2332,7 @@ fn syncPanelGridFromWindowSize(width: i32, height: i32) void {
 }
 
 fn resetInputRepaintForTest() void {
-    AppWindow.g_force_rebuild = false;
-    AppWindow.g_cells_valid = true;
+    restoreInputRepaintForTest(false, true);
 }
 
 /// Put back the dirty globals a test saved before it ran — the one restore
@@ -7126,7 +7125,9 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
             };
 
             // Update the ratio in place
+            if (active_tab.tree.nodes[handle.idx()].split.ratio == new_ratio) return;
             active_tab.tree.resizeInPlace(handle, new_ratio);
+            split_layout.reclaimSplitControls(&active_tab.tree, handle);
 
             // Force layout recalculation and redraw
             requestInputRepaint();

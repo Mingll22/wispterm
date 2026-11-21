@@ -6,7 +6,7 @@ import { api } from "../transport";
 export function renderLogin(app: HTMLElement, onSuccess: () => void): void {
   app.innerHTML = `
     <section class="shell auth-shell" aria-labelledby="login-title">
-      <div class="panel auth-panel">
+      <div class="panel auth-panel glass-surface">
         <header class="auth-header">
           <div class="brand auth-brand">WispTerm Remote</div>
           ${themeToggleMarkup()}

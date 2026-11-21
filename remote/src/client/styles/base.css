@@ -16,7 +16,7 @@ body {
   color: var(--text);
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
-  transition: background-color 200ms ease, color 200ms ease;
+  transition: background-color var(--motion-duration) ease, color var(--motion-duration) ease;
 }
 
 button,
@@ -72,6 +72,7 @@ button {
   padding: 12px 18px;
   font-weight: 800;
   cursor: pointer;
+  transition: background-color var(--motion-duration) ease, border-color var(--motion-duration) ease;
 }
 
 button:disabled {
@@ -90,6 +91,11 @@ button:disabled {
   border: 1px solid var(--line);
   background: var(--ghost-bg);
   color: var(--text);
+}
+
+.secondary-button:not(:disabled):hover,
+.ghost-button:not(:disabled):hover {
+  background: var(--ghost-bg-strong);
 }
 
 .ghost-button {
@@ -155,7 +161,7 @@ button:disabled {
   min-height: 0;
   align-items: safe center;
   overflow-y: auto;
-  background: var(--bg);
+  background: var(--workspace-background);
   padding: max(24px, var(--safe-top)) max(16px, var(--safe-right)) max(24px, var(--safe-bottom))
     max(16px, var(--safe-left));
 }
@@ -163,7 +169,7 @@ button:disabled {
 .auth-panel {
   width: min(100%, 372px);
   padding: clamp(20px, 5vw, 28px);
-  box-shadow: none;
+  border-radius: var(--radius-floating);
 }
 
 .auth-header {
@@ -257,6 +263,25 @@ button:disabled {
 
 .icon-button:active {
   background: var(--accent-soft);
+}
+
+.glass-surface {
+  border: 1px solid var(--glass-line);
+  background: var(--glass-bg);
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: blur(18px) saturate(130%);
+  backdrop-filter: blur(18px) saturate(130%);
+}
+
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-duration: 0ms;
+  }
 }
 
 @keyframes fade-in {

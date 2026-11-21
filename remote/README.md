@@ -265,6 +265,21 @@ Browser input is routed back to the selected surface:
 { "type": "input-bytes", "surfaceId": "0000000000000001", "encoding": "hex", "data": "0d" }
 ```
 
+### Responsive terminal control
+
+Browser clients can control a directly backed terminal when its layout advertises
+`terminalControl: true`. Each visible pane requests a 60-second desktop lease
+with its measured character grid. A foreground browser renews every 20 seconds
+and sends resize requests when its measured rows or columns change.
+
+Only one browser can send input or resize a given leased terminal. A second
+browser can view its live output and choose **Take control**. Closing the pane
+or choosing **Release** returns its grid to the desktop. Desktop window and
+split changes also return control immediately. Detached clients lose their
+lease when it expires. The desktop applies PTY resizes only when the effective
+grid changes and broadcasts the new grid in order with the terminal byte stream.
+Other terminal panes and AI Chat use their existing paths.
+
 The relay can also ask WispTerm to create an Agent tab when Weixin input has no
 AI Chat target:
 

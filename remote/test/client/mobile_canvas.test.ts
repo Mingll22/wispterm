@@ -5,6 +5,7 @@ import {
   CANVAS_PAN_TAP_THRESHOLD,
   clampCanvasPan,
   defaultCanvasPan,
+  fitTerminalCanvas,
   isCanvasDrag,
   meaningfulTerminalCanvasHeight,
   panCanvasBy,
@@ -21,6 +22,25 @@ import {
   touchHistoryScrollLines,
   verticalScrollbarMetrics,
 } from "../../src/client/mobile_canvas";
+
+test("a width-limited terminal grid fills the width and stays at the top inset", () => {
+  assert.deepEqual(fitTerminalCanvas({ width: 700, height: 1040 }, { width: 760, height: 486 }, 1), {
+    scale: 700 / 760, y: 0,
+  });
+});
+
+test("a height-limited terminal grid fills the height", () => {
+  assert.deepEqual(fitTerminalCanvas({ width: 900, height: 320 }, { width: 800, height: 640 }, 1), {
+    scale: 0.5, y: 0,
+  });
+});
+
+test("mobile visual zoom only centers vertically when height limits the fit", () => {
+  const viewport = { width: 600, height: 300 };
+  assert.deepEqual(fitTerminalCanvas(viewport, { width: 800, height: 200 }, 0.5), { scale: 0.375, y: 0 });
+  assert.deepEqual(fitTerminalCanvas(viewport, { width: 800, height: 400 }, 0.5), { scale: 0.375, y: 0 });
+  assert.deepEqual(fitTerminalCanvas(viewport, { width: 500, height: 500 }, 0.5), { scale: 0.3, y: 75 });
+});
 
 test("clampCanvasPan keeps an oversized canvas inside the viewport", () => {
   assert.deepEqual(

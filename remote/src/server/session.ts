@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import type { WebSocket } from "ws";
+import { browserTerminalMessage, hostTerminalMessage, type TerminalGridMessage } from "./terminal_control_protocol.js";
 
 export type RelayMessage = {
   type?: string;
@@ -20,6 +22,7 @@ export type RelayMessage = {
       focused?: boolean;
       kind?: "terminal" | "ai_chat";
       readOnly?: boolean;
+      terminalControl?: boolean;
       snapshot?: string;
     }>;
   }>;
@@ -60,6 +63,7 @@ export class RemoteSession {
   wispterm: WebSocket | null = null;
   browsers = new Set<WebSocket>();
   lastLayout: RelayMessage | null = null;
+  private gridsSinceLayout = new Map<string, TerminalGridMessage>();
   private layoutListeners = new Set<() => void>();
   private pendingAiAgentOpenRequests = new Map<string, (status: AiAgentOpenResult) => void>();
 
@@ -73,6 +77,7 @@ export class RemoteSession {
 
   applyLayout(message: RelayMessage): void {
     this.lastLayout = message;
+    this.gridsSinceLayout.clear();
     for (const listener of [...this.layoutListeners]) {
       try {
         listener();
@@ -210,6 +215,7 @@ export class RemoteSession {
       // ignore
     }
     this.wispterm = socket;
+    this.gridsSinceLayout.clear();
     trackHeartbeat(socket);
     this.broadcast({ type: "notice", message: "WispTerm connected" });
     this.broadcastPeerStatus();
@@ -225,6 +231,7 @@ export class RemoteSession {
     });
 
     socket.on("message", (raw) => {
+      if (this.wispterm !== socket) return;
       const message = safeJson(raw.toString());
       if (!message) return;
       if (message.type === "ping") {
@@ -245,6 +252,12 @@ export class RemoteSession {
           encoding: message.encoding,
           data: message.data,
         });
+      } else if (message.type === "terminal-control-state" || message.type === "terminal-grid") {
+        const terminalMessage = hostTerminalMessage(message);
+        if (terminalMessage) {
+          if (terminalMessage.type === "terminal-grid") this.gridsSinceLayout.set(terminalMessage.surfaceId, terminalMessage);
+          this.broadcast(terminalMessage);
+        }
       } else if (message.type === "layout") {
         this.applyLayout(message);
         this.broadcast(message);
@@ -261,14 +274,17 @@ export class RemoteSession {
   }
 
   attachBrowser(socket: WebSocket): void {
+    const clientId = randomUUID();
     this.browsers.add(socket);
     trackHeartbeat(socket);
+    safeSend(socket, { type: "terminal-control-client", clientId });
     safeSend(socket, { type: "notice", message: "Browser paired; input enabled" });
     // The cached layout goes first and the peer status last: the client marks
     // the host connected when it sees a layout, so replaying a stale one
     // after the status made an offline host look online (and its input
     // "enabled") until the next real status change.
     if (this.lastLayout) safeSend(socket, this.lastLayout);
+    for (const grid of this.gridsSinceLayout.values()) safeSend(socket, grid);
     if (this.isWispTermConnected()) safeSend(socket, { type: "notice", message: "WispTerm connected" });
     this.sendPeerStatus(socket);
 
@@ -279,6 +295,7 @@ export class RemoteSession {
     });
 
     socket.on("message", (raw) => {
+      if (!this.browsers.has(socket)) return;
       const message = safeJson(raw.toString());
       if (!message) return;
       if (message.type === "ping") {
@@ -286,20 +303,8 @@ export class RemoteSession {
         return;
       }
       if (message.type === "pong") return;
-      if (
-        message.type === "input-bytes" &&
-        typeof message.surfaceId === "string" &&
-        typeof message.data === "string"
-      ) {
-        if (this.wispterm) {
-          safeSend(this.wispterm, {
-            type: "input-bytes",
-            surfaceId: message.surfaceId,
-            encoding: message.encoding,
-            data: message.data,
-          });
-        }
-      }
+      const terminalMessage = browserTerminalMessage(message, clientId);
+      if (terminalMessage && this.wispterm) safeSend(this.wispterm, terminalMessage);
     });
 
     socket.on("close", () => {
@@ -307,7 +312,7 @@ export class RemoteSession {
     });
   }
 
-  broadcast(message: RelayMessage): void {
+  broadcast(message: object): void {
     const payload = JSON.stringify(message);
     for (const browser of this.browsers) {
       try {
@@ -371,7 +376,8 @@ function isAiAgentOpenStatus(value: unknown): value is AiAgentOpenStatus {
 
 export function safeJson(data: string): RelayMessage | null {
   try {
-    return JSON.parse(data) as RelayMessage;
+    const parsed: unknown = JSON.parse(data);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as RelayMessage : null;
   } catch {
     return null;
   }

@@ -12,10 +12,10 @@ type TerminalPalette = {
 
 const PALETTES: Record<ThemeMode, TerminalPalette> = {
   dark: {
-    background: "#090f17",
-    foreground: "#dce7f3",
+    background: "#000000",
+    foreground: "#ffffff",
     cursor: "#ffd479",
-    selectionBackground: "#334155",
+    selectionBackground: "#38383a",
   },
   light: {
     background: "#fbf6ec",

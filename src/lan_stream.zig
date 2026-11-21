@@ -443,7 +443,7 @@ const Conn = struct {
 
         hub.addTransport(self, transportSend);
         defer hub.removeTransport(self);
-        if (hub.lastLayoutAlloc(server.allocator)) |layout| self.enqueueOwned(layout);
+        _ = hub.replayLastLayout(self);
 
         var last_send_ms = std.time.milliTimestamp();
         while (!server.stop_flag.load(.acquire) and !self.closed.load(.acquire)) {
