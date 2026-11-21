@@ -211,7 +211,9 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
         <button type="button" class="icon-button desktop-sidebar-toggle glass-surface" id="sidebar-expand" aria-label="${tr("Open sidebar", "打开侧栏")}" title="${tr("Open sidebar", "打开侧栏")}" aria-controls="sidebar" aria-expanded="${!state.sidebarCollapsed}">
           ${iconMenu()}
         </button>
-        <span class="status-pip workspace-status glass-surface" id="workspace-status" data-state="offline">${tr("Offline", "未连接")}</span>
+        <span class="status-pip collapsed-status glass-surface" id="workspace-status" data-state="offline">
+          <span class="collapsed-status-label">${tr("Offline", "未连接")}</span>
+        </span>
         ${themeToggleMarkup("collapsed-theme glass-surface")}
       </div>
       <section class="workspace">
@@ -359,9 +361,10 @@ export function setStatus(status: ConnectionStatus): void {
     dot.setAttribute("aria-label", accessibilityText);
   }
   if (label) label.textContent = status.text;
-  document.querySelectorAll<HTMLElement>("#mobile-status-pip, #workspace-status, #sidebar-workspace-status").forEach((pip) => {
+  document.querySelectorAll<HTMLElement>("#mobile-status-pip, #sidebar-workspace-status, #workspace-status").forEach((pip) => {
     pip.dataset.state = status.kind;
-    pip.textContent = shortLabel;
+    const pipLabel = pip.querySelector(".collapsed-status-label") ?? pip;
+    pipLabel.textContent = shortLabel;
     pip.title = accessibilityText;
     pip.setAttribute("aria-label", accessibilityText);
   });

@@ -1,8 +1,9 @@
 .console-shell {
   --sidebar-width: 252px;
-  --collapsed-rail-width: 52px;
   --workspace-header-height: 40px;
   --workspace-inset: 10px;
+  --collapsed-rail-end-inset: 4px;
+  --collapsed-rail-width: calc(var(--workspace-inset) + var(--workspace-header-height) + var(--collapsed-rail-end-inset));
   --pane-gutter: 6px;
   height: var(--remote-visual-viewport-height, 100dvh);
   min-height: 0;
@@ -262,25 +263,28 @@
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  padding: var(--workspace-inset) 4px var(--workspace-inset) var(--workspace-inset);
+  padding: var(--workspace-inset) var(--collapsed-rail-end-inset) var(--workspace-inset) var(--workspace-inset);
 }
 
-.collapsed-controls .icon-button,
-.collapsed-controls .workspace-status {
-  width: 38px;
-  height: 38px;
+.collapsed-controls :is(.icon-button, .collapsed-status) {
+  width: var(--workspace-header-height);
+  height: var(--workspace-header-height);
   flex: 0 0 auto;
   border-radius: var(--radius);
 }
 
-.collapsed-controls .workspace-status {
+.collapsed-controls .collapsed-status {
   flex-direction: column;
   gap: 3px;
-  padding: 0;
+  padding: 0 1px;
   font-size: 10px;
   line-height: 1;
-  text-align: center;
-  white-space: normal;
+}
+
+.collapsed-status-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .collapsed-controls .collapsed-theme {
@@ -1018,7 +1022,6 @@
   min-width: 0;
   column-gap: 8px;
   padding: 5px var(--terminal-inline-gutter);
-  padding-inline-start: clamp(var(--terminal-inline-gutter), var(--terminal-title-inset, 0px), 50%);
   border-bottom: 1px solid var(--line);
   color: var(--muted);
   font-size: 12px;
@@ -1067,6 +1070,7 @@
   width: auto;
   height: auto;
   margin: 6px var(--terminal-inline-gutter);
+  will-change: auto;
 }
 
 .terminal-mount[data-terminal-lease] .canvas-scrollbar {
@@ -1097,7 +1101,10 @@
 .terminal-mount[data-terminal-lease] .xterm {
   width: var(--terminal-grid-width, 100%);
   height: var(--terminal-grid-height, 100%);
-  transform: var(--terminal-grid-transform, none);
+  inset-block-start: var(--terminal-grid-top, 0px);
+  zoom: var(--terminal-grid-zoom, 1);
+  transform: none;
+  will-change: auto;
 }
 
 .terminal-mount[data-terminal-lease] .xterm-scrollable-element {

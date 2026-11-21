@@ -688,11 +688,11 @@ function placeTerminalGrid(view: SurfaceView): void {
   const viewport = view.host.getBoundingClientRect();
   if (!viewport.width || !viewport.height) return;
   const grid = { width: screen.offsetWidth, height: screen.offsetHeight };
-  const { x, y, scale } = fitTerminalCanvas(viewport, grid, isMobileRemoteShell() ? state.mobileVisualZoom : 1);
+  const { y, scale } = fitTerminalCanvas(viewport, grid, isMobileRemoteShell() ? state.mobileVisualZoom : 1);
   view.host.style.setProperty("--terminal-grid-width", `${grid.width}px`);
   view.host.style.setProperty("--terminal-grid-height", `${grid.height}px`);
-  view.host.style.setProperty("--terminal-grid-transform", `translate(${x}px, ${y}px) scale(${scale})`);
-  view.control.style.setProperty("--terminal-title-inset", `calc(var(--terminal-inline-gutter) + ${x}px)`);
+  view.host.style.setProperty("--terminal-grid-zoom", String(scale));
+  view.host.style.setProperty("--terminal-grid-top", `${y / scale}px`);
 }
 
 function applyInitialSnapshot(view: SurfaceView, surface: LayoutSurface): void {
