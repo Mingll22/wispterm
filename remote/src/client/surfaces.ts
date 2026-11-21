@@ -7,6 +7,7 @@ import {
   CANVAS_WHEEL_EVENT_OPTIONS,
   canvasPanRenderState,
   defaultCanvasPan,
+  fitTerminalCanvas,
   isCanvasDrag,
   meaningfulTerminalCanvasHeight,
   panYFromVerticalScrollbarThumb,
@@ -32,6 +33,7 @@ import { cursorMoveSequence, emptyState, validPositiveInteger } from "./utils";
 import { currentTab, resetSurfaceViews, state } from "./state";
 import { getTerminalPalette, subscribeToTheme } from "./theme";
 import { REMOTE_TERMINAL_SCROLLBACK } from "./terminal_options";
+import { mapScaledTerminalPointer } from "./terminal_pointer";
 import { supportedTerminalGrid, terminalControl, type TerminalControlTarget } from "./terminal_control";
 import {
   shouldBufferLiveOutputForInitialSnapshot,
@@ -260,6 +262,7 @@ export function renderRemotePanels(): void {
     applySurfaceVisualZoom(view);
     if (!view.opened) {
       view.term.open(view.host);
+      mapScaledTerminalPointer(view.term, () => !view.control.hidden);
       view.opened = true;
       applySurfaceVisualZoom(view);
       syncTerminalNativeInputGuard(view);
@@ -268,6 +271,8 @@ export function renderRemotePanels(): void {
         scheduleControlMeasurement();
       });
       view.resizeObserver.observe(view.host);
+      const screen = view.host.querySelector(".xterm-screen");
+      if (screen) view.resizeObserver.observe(screen);
     }
     updateSurfaceCursor(view, surface.id);
     applyInitialSnapshot(view, surface);
@@ -379,6 +384,7 @@ function queueTerminalGrid(view: SurfaceView, cols: number, rows: number): void 
   view.term.write("", () => {
     view.queuedGridChanges--;
     if (view.term.cols !== cols || view.term.rows !== rows) view.term.resize(cols, rows);
+    placeTerminalGrid(view);
     view.needsDefaultCanvasPan = true;
     scheduleFit(view);
   });
@@ -622,7 +628,6 @@ function applySurfaceInputPolicy(view: SurfaceView, surface: LayoutSurface | und
   const showLease = supportsLease;
   view.control.hidden = !showLease;
   view.mount.toggleAttribute("data-terminal-lease", showLease);
-  view.mount.toggleAttribute("data-terminal-grid-fit", showLease && held);
   if (!showLease || !surface) return;
   const reason = terminalControl.reason(surface.id);
   const connected = terminalControl.isAvailable();
@@ -668,7 +673,7 @@ function scheduleFit(view: SurfaceView): void {
     try {
       fitOrResize(view);
       updateCanvasPan(view);
-      alignTerminalTitle(view);
+      placeTerminalGrid(view);
       view.term.refresh(0, Math.max(0, view.term.rows - 1));
     } catch {
       // xterm can briefly report zero-sized panels while layout is settling.
@@ -676,16 +681,18 @@ function scheduleFit(view: SurfaceView): void {
   });
 }
 
-function alignTerminalTitle(view: SurfaceView): void {
+function placeTerminalGrid(view: SurfaceView): void {
   if (view.control.hidden) return;
-  const screen = view.host.querySelector(".xterm-screen")?.getBoundingClientRect();
-  if (!screen?.width) return;
-  const header = view.control.getBoundingClientRect();
-  // Keep the title the same place when the user pans a larger grid.
-  const inset = `${screen.left - header.left - view.canvasPan.x}px`;
-  if (view.control.style.getPropertyValue("--terminal-title-inset") !== inset) {
-    view.control.style.setProperty("--terminal-title-inset", inset);
-  }
+  const screen = view.host.querySelector<HTMLElement>(".xterm-screen");
+  if (!screen?.offsetWidth || !screen.offsetHeight) return;
+  const viewport = view.host.getBoundingClientRect();
+  if (!viewport.width || !viewport.height) return;
+  const grid = { width: screen.offsetWidth, height: screen.offsetHeight };
+  const { x, y, scale } = fitTerminalCanvas(viewport, grid, isMobileRemoteShell() ? state.mobileVisualZoom : 1);
+  view.host.style.setProperty("--terminal-grid-width", `${grid.width}px`);
+  view.host.style.setProperty("--terminal-grid-height", `${grid.height}px`);
+  view.host.style.setProperty("--terminal-grid-transform", `translate(${x}px, ${y}px) scale(${scale})`);
+  view.control.style.setProperty("--terminal-title-inset", `calc(var(--terminal-inline-gutter) + ${x}px)`);
 }
 
 function applyInitialSnapshot(view: SurfaceView, surface: LayoutSurface): void {
@@ -714,6 +721,7 @@ function applyInitialSnapshot(view: SurfaceView, surface: LayoutSurface): void {
     try {
       fitOrResize(view);
       updateCanvasPan(view);
+      placeTerminalGrid(view);
     } catch {
       // xterm can briefly report zero-sized panels while layout is settling.
     }
@@ -1107,10 +1115,11 @@ function canvasViewportSize(view: SurfaceView): CanvasSize {
 }
 
 function terminalCanvasBottomGutter(view: SurfaceView, mobile: boolean): number {
-  return mobile && !view.mount.hasAttribute("data-terminal-grid-fit") ? MOBILE_CANVAS_BOTTOM_GUTTER : 0;
+  return mobile && view.control.hidden ? MOBILE_CANVAS_BOTTOM_GUTTER : 0;
 }
 
 function canvasContentSize(view: SurfaceView): CanvasSize {
+  if (!view.control.hidden) return canvasViewportSize(view);
   const screen = view.host.querySelector<HTMLElement>(".xterm-screen");
   const xterm = view.host.querySelector<HTMLElement>(".xterm");
   const terminalHeight = terminalCanvasHeight(view, screen);

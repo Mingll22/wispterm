@@ -1095,24 +1095,16 @@
 }
 
 .terminal-mount[data-terminal-lease] .xterm {
-  display: flex;
-  flex-direction: column;
-  justify-content: safe center;
-}
-
-.terminal-mount[data-terminal-grid-fit] .xterm {
-  transform-origin: center;
+  width: var(--terminal-grid-width, 100%);
+  height: var(--terminal-grid-height, 100%);
+  transform: var(--terminal-grid-transform, none);
 }
 
 .terminal-mount[data-terminal-lease] .xterm-scrollable-element {
-  display: flex;
-  flex: none;
-  justify-content: safe center;
   background-color: transparent !important;
 }
 
 .terminal-mount[data-terminal-lease] .xterm-screen {
-  flex: none;
   outline: none;
   box-shadow: none;
 }
