@@ -194,6 +194,12 @@ export function renderRemotePanels(): void {
   if (!panelsRoot) return;
 
   const tab = currentTab();
+  const selectedSurface = tab?.surfaces.find((surface) => surface.id === state.selectedSurfaceId) ?? tab?.surfaces[0];
+  const workspace = panelsRoot.closest(".workspace");
+  const titleInPane = selectedSurface?.terminalControl === true && selectedSurface.readOnly !== true;
+  workspace?.toggleAttribute("data-context-title", Boolean(selectedSurface && !titleInPane));
+  workspace?.toggleAttribute("data-title-in-pane", titleInPane);
+  workspace?.toggleAttribute("data-panel-selector", (tab?.surfaces.length ?? 0) > 1 && state.desktopPanelMode === "single");
   if (!tab || tab.surfaces.length === 0) {
     panelsRoot.className = "panels-stage empty";
     delete panelsRoot.dataset.mobileMode;
@@ -618,13 +624,14 @@ function applySurfaceInputPolicy(view: SurfaceView, surface: LayoutSurface | und
     surface?.kind === "ai_chat" || surface?.readOnly === true || (supportsLease && !held) || isViewModeInputBlocked();
   syncTerminalNativeInputGuard(view);
 
-  const showLease = supportsLease && terminalControl.isAvailable();
+  const showLease = supportsLease;
   view.control.hidden = !showLease;
   view.mount.toggleAttribute("data-terminal-lease", showLease);
   view.mount.toggleAttribute("data-terminal-grid-fit", showLease && held);
   if (!showLease || !surface) return;
   const reason = terminalControl.reason(surface.id);
-  let status = tr("Viewing", "只读");
+  const connected = terminalControl.isAvailable();
+  let status = connected ? tr("Viewing", "只读") : tr("Offline", "未连接");
   if (held) status = tr("This browser", "本浏览器控制");
   else if (terminalControl.controlledByOther(surface.id)) status = tr("Another client", "其他端控制");
   else if (reason === "desktop") status = tr("Desktop in control", "桌面端控制");
@@ -637,7 +644,7 @@ function applySurfaceInputPolicy(view: SurfaceView, surface: LayoutSurface | und
   if (view.controlStatus.textContent !== status) view.controlStatus.textContent = status;
   if (view.controlButton.textContent !== action) view.controlButton.textContent = action;
   view.controlButton.classList.toggle("secondary-button", held);
-  view.controlButton.disabled = reason === "unsupported";
+  view.controlButton.disabled = !connected || reason === "unsupported";
 }
 
 function syncTerminalNativeInputGuard(view: SurfaceView): void {

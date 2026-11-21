@@ -76,11 +76,12 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   app.innerHTML = `
     <section class="console-shell" data-kbd-visible="${state.kbdVisible}" data-mobile-surface-kind="none" data-mobile-vkbd-visible="false" data-mobile-input-mode="${state.mobileInputMode}" data-mobile-visual-zoom="${mobileVisualZoomPercent(state.mobileVisualZoom)}" data-drawer-open="${state.drawerOpen}" data-sidebar-collapsed="${state.sidebarCollapsed}" data-desktop-panel-mode="${state.desktopPanelMode}" data-sidebar-page="${sidebarPage}">
       <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
-      <aside class="sidebar" id="sidebar">
+      <aside class="sidebar glass-surface" id="sidebar">
         <div class="sidebar-main">
           <div class="sidebar-head">
             <span class="sidebar-wordmark">WispTerm</span>
             <div class="sidebar-head-actions">
+              <span class="status-pip sidebar-status" id="sidebar-workspace-status" data-state="offline">${tr("Offline", "未连接")}</span>
               <button type="button" class="icon-button" id="drawer-close" aria-label="${tr("Close menu", "关闭菜单")}" title="${tr("Close menu", "关闭菜单")}">
                 ${iconClose()}
               </button>
@@ -195,7 +196,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
         </div>
       </aside>
       <section class="workspace">
-        <header class="mobile-bar">
+        <header class="mobile-bar glass-surface">
           <button type="button" class="icon-button" id="drawer-open" aria-label="${tr("Open menu", "打开菜单")}" aria-controls="sidebar" aria-expanded="${state.drawerOpen}">
             ${iconMenu()}
           </button>
@@ -221,20 +222,16 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
             </button>
           </div>
         </header>
-        <div class="surface-strip" id="surface-strip"></div>
+        <div class="desktop-dock">
+          <button type="button" class="icon-button desktop-sidebar-toggle glass-surface" id="sidebar-expand" aria-label="${tr("Open sidebar", "打开侧栏")}" title="${tr("Open sidebar", "打开侧栏")}" aria-controls="sidebar" aria-expanded="${!state.sidebarCollapsed}">
+            ${iconMenu()}
+          </button>
+          <span id="workspace-title">${tr("Remote workspace", "远程工作区")}</span>
+          <div class="surface-strip" id="surface-strip"></div>
+          <span class="control-state" id="control-state" hidden>${tr("Read only", "只读")}</span>
+          <span class="status-pip workspace-status glass-surface" id="workspace-status" data-state="offline">${tr("Offline", "未连接")}</span>
+        </div>
         <section class="terminal-panel">
-          <div class="terminal-toolbar">
-            <div class="terminal-title-group">
-              <button type="button" class="icon-button desktop-sidebar-toggle" id="sidebar-expand" aria-label="${tr("Open sidebar", "打开侧栏")}" title="${tr("Open sidebar", "打开侧栏")}">
-                ${iconMenu()}
-              </button>
-              <span id="workspace-title">${tr("Remote workspace", "远程工作区")}</span>
-            </div>
-            <div class="terminal-actions">
-              <span class="workspace-status" id="workspace-status" data-state="offline">${tr("Offline", "未连接")}</span>
-              <span class="control-state" id="control-state" hidden>${tr("Read only", "只读")}</span>
-            </div>
-          </div>
           <div id="remote-panels" class="panels-stage empty"></div>
           <div class="connection-empty" id="connection-empty">
             <div class="connection-empty-content">
@@ -332,30 +329,23 @@ export function setStatus(status: ConnectionStatus): void {
   currentConnectionStatus = status;
   const dot = document.querySelector<HTMLButtonElement>("#status-dot");
   const label = document.querySelector<HTMLSpanElement>("#status-text");
-  const pip = document.querySelector<HTMLButtonElement>("#mobile-status-pip");
   const accessibilityText = `${status.text}。 ${status.detail}`;
-  const workspaceStatus = document.querySelector<HTMLSpanElement>("#workspace-status");
   const shortLabel =
     status.kind === "online" ? tr("Online", "已连接") :
     status.kind === "high-latency" ? tr("Slow", "高延迟") :
     status.kind === "connecting" ? tr("Linking", "连接中") : tr("Offline", "未连接");
-  if (workspaceStatus) {
-    workspaceStatus.dataset.state = status.kind;
-    workspaceStatus.textContent = shortLabel;
-    workspaceStatus.title = accessibilityText;
-  }
   if (dot) {
     dot.dataset.state = status.kind;
     dot.title = accessibilityText;
     dot.setAttribute("aria-label", accessibilityText);
   }
   if (label) label.textContent = status.text;
-  if (pip) {
+  document.querySelectorAll<HTMLElement>("#mobile-status-pip, #workspace-status, #sidebar-workspace-status").forEach((pip) => {
     pip.dataset.state = status.kind;
     pip.textContent = shortLabel;
     pip.title = accessibilityText;
     pip.setAttribute("aria-label", accessibilityText);
-  }
+  });
   renderConnectionLink("#relay-status", status.relay);
   renderConnectionLink("#desktop-status", status.desktop);
   renderConnectionEmpty();
@@ -1153,6 +1143,8 @@ function setSidebarCollapsed(collapsed: boolean): void {
   saveSidebarCollapsed(collapsed);
   const shell = document.querySelector<HTMLElement>(".console-shell");
   if (shell) shell.dataset.sidebarCollapsed = String(collapsed);
+  document.querySelector("#sidebar-expand")?.setAttribute("aria-expanded", String(!collapsed));
+  document.querySelector<HTMLButtonElement>(collapsed ? "#sidebar-expand" : "#drawer-close")?.focus({ preventScroll: true });
   requestAnimationFrame(() => refitAllSurfaces());
 }
 
