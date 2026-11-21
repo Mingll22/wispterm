@@ -1,3 +1,4 @@
+import { tr } from "./i18n";
 import type { ThemeMode } from "./types";
 import { iconMoon, iconSun } from "./icons";
 import { readSavedTheme, saveTheme } from "./storage";
@@ -62,7 +63,7 @@ export function subscribeToTheme(sub: Subscriber): () => void {
 }
 
 export function updateThemeToggleButtons(): void {
-  const label = mode === "dark" ? "Switch to light theme" : "Switch to dark theme";
+  const label = mode === "dark" ? tr("Switch to light theme", "切换到浅色主题") : tr("Switch to dark theme", "切换到深色主题");
   const icon = mode === "dark" ? iconSun() : iconMoon();
   document.querySelectorAll<HTMLButtonElement>("[data-theme-toggle]").forEach((button) => {
     button.setAttribute("aria-label", label);

@@ -11,6 +11,11 @@ Relay server for WispTerm remote access. Provides:
 The browser mirrors WispTerm tabs and split panels from layout snapshots, then
 routes input back to the selected surface.
 
+## Interface language
+
+The remote console starts in Simplified Chinese for Chinese browser languages and in English otherwise.
+After signing in, select **Settings → Language** to choose **English** or **简体中文**. The browser saves the choice locally and refreshes the console, reconnecting with the saved session key if available.
+
 ## Deployment Options
 
 Two parallel deployment targets are supported. Pick either one — they share

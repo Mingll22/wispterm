@@ -1,3 +1,4 @@
+import { tr } from "./i18n";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 
@@ -36,6 +37,9 @@ import {
   shouldFlushBufferedOutput,
   shouldScheduleInitialSnapshotReplay,
 } from "./snapshot_replay";
+
+Terminal.strings.promptLabel = tr("Terminal input", "终端输入");
+Terminal.strings.tooMuchOutput = tr("Too much output. Navigate to rows manually to read", "终端输出过多，可逐行浏览内容");
 
 const PENDING_OUTPUT_LIMIT = 128 * 1024;
 const MOBILE_CANVAS_BOTTOM_GUTTER = 12;
@@ -164,15 +168,15 @@ export function renderRemotePanels(): void {
     panelsRoot.className = "panels-stage empty";
     delete panelsRoot.dataset.mobileMode;
     delete panelsRoot.dataset.desktopMode;
-    panelsRoot.replaceChildren(emptyState("No panels for this tab yet."));
-    const fallback = "Remote workspace";
+    panelsRoot.replaceChildren(emptyState(tr("No panels for this tab yet.", "此标签页暂无面板")));
+    const fallback = tr("Remote workspace", "远程工作区");
     if (titleRoot) titleRoot.textContent = fallback;
     const mobileTitleRoot = document.querySelector<HTMLSpanElement>("#mobile-workspace-title");
     if (mobileTitleRoot) mobileTitleRoot.textContent = fallback;
     return;
   }
 
-  const tabTitle = tab.title || `Tab ${tab.index + 1}`;
+  const tabTitle = tab.title || tr(`Tab ${tab.index + 1}`, `标签页 ${tab.index + 1}`);
   if (titleRoot) titleRoot.textContent = tabTitle;
   const mobileTitleRoot = document.querySelector<HTMLSpanElement>("#mobile-workspace-title");
   if (mobileTitleRoot) mobileTitleRoot.textContent = tabTitle;
@@ -352,7 +356,7 @@ function renderAiChatPanel(view: SurfaceView, surface: LayoutSurface): void {
     view.mount.className = "terminal-mount ai-chat-mount";
     view.mount.replaceChildren(container);
   }
-  const snapshot = surface.snapshot || "No messages yet.";
+  const snapshot = surface.snapshot || tr("No messages yet.", "暂无消息");
   if (view.snapshotText !== snapshot && view.aiTranscript) {
     view.snapshotText = snapshot;
     renderAiChatTranscript(view.aiTranscript, snapshot);
@@ -378,18 +382,18 @@ function ensureAiChatElements(view: SurfaceView, surfaceId: string): HTMLDivElem
   const input = document.createElement("textarea");
   input.className = "ai-chat-input";
   input.rows = 3;
-  input.placeholder = "Ask Agent";
+  input.placeholder = tr("Ask Agent", "向智能助手提问");
   input.spellcheck = false;
 
   const send = document.createElement("button");
   send.className = "ai-chat-send";
   send.type = "submit";
-  send.textContent = "Send";
+  send.textContent = tr("Send", "发送");
 
   const stop = document.createElement("button");
   stop.className = "ai-chat-stop";
   stop.type = "button";
-  stop.textContent = "Stop";
+  stop.textContent = tr("Stop", "停止");
   stop.disabled = true;
 
   const submit = (): void => {
@@ -418,7 +422,7 @@ function ensureAiChatElements(view: SurfaceView, surfaceId: string): HTMLDivElem
 
   stop.addEventListener("click", () => {
     stop.disabled = true;
-    stop.textContent = "Stopping";
+    stop.textContent = tr("Stopping", "正在停止…");
     stop.dataset.active = "false";
     inputHandler(surfaceId, "\x1b");
   });
@@ -462,7 +466,7 @@ function renderAiChatTranscript(root: HTMLDivElement, snapshot: string): void {
   if (messages.length === 0) {
     const empty = document.createElement("div");
     empty.className = "ai-chat-empty";
-    empty.textContent = "No messages yet.";
+    empty.textContent = tr("No messages yet.", "暂无消息");
     root.appendChild(empty);
     return;
   }
@@ -478,7 +482,7 @@ function renderAiChatMessage(message: AiChatMessage): HTMLElement {
 
   const label = document.createElement("div");
   label.className = "ai-chat-message-label";
-  label.textContent = message.label;
+  label.textContent = message.role === "user" ? tr("You", "你") : message.role === "tool" ? tr("Tool", "工具") : message.label;
 
   const bubble = document.createElement("div");
   bubble.className = "ai-chat-bubble";

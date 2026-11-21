@@ -1,3 +1,4 @@
+import { tr } from "./i18n";
 export function iconMenu(): string {
   return `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>`;
 }
@@ -22,5 +23,5 @@ export function iconMoon(): string {
 }
 
 export function themeToggleMarkup(extraClass = ""): string {
-  return `<button type="button" class="icon-button theme-toggle${extraClass ? ` ${extraClass}` : ""}" data-theme-toggle aria-label="Toggle theme" title="Toggle theme"></button>`;
+  return `<button type="button" class="icon-button theme-toggle${extraClass ? ` ${extraClass}` : ""}" data-theme-toggle aria-label="${tr("Toggle theme", "切换主题")}" title="${tr("Toggle theme", "切换主题")}"></button>`;
 }

@@ -1,3 +1,4 @@
+import { tr } from "./i18n";
 import { applyStickyMods, ctrlLetter, keyToSequence } from "./input_sequences";
 import { focusMobileTextInput } from "./mobile_text_input";
 import { activeSurfaceIdForInput, state } from "./state";
@@ -91,7 +92,7 @@ export function syncVirtualKeyboardInputMode(): void {
   const disabled = inputMode === "view";
   ime.disabled = disabled;
   ime.setAttribute("aria-disabled", String(disabled));
-  ime.title = disabled ? "System keyboard disabled in view mode" : "Return to system keyboard";
+  ime.title = disabled ? tr("System keyboard disabled in view mode", "查看模式下无法使用系统键盘") : tr("Return to system keyboard", "切换回系统键盘");
   if (disabled) ime.dataset.active = "false";
 }
 

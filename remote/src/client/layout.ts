@@ -1,3 +1,4 @@
+import { tr } from "./i18n";
 import type { LayoutState, LayoutSurface, LayoutTab, RelayMessage } from "./types";
 import { numberOr, shortSurfaceId } from "./utils";
 
@@ -18,7 +19,7 @@ export function normalizeLayout(message: RelayMessage): LayoutState {
         : [];
       return {
         index,
-        title: typeof tab.title === "string" ? tab.title : `Tab ${index + 1}`,
+        title: typeof tab.title === "string" ? tab.title : tr(`Tab ${index + 1}`, `标签页 ${index + 1}`),
         focusedSurfaceId: typeof tab.focusedSurfaceId === "string" ? tab.focusedSurfaceId : surfaces[0]?.id,
         surfaces,
       };

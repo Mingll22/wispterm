@@ -1,3 +1,4 @@
+import { getLocale, isRemoteLocale, setLocale, tr } from "../i18n";
 import type { ConnectionStatus, DesktopPanelMode, LayoutSurface, MobileInputMode, MobileVisualZoom } from "../types";
 import { iconClose, iconMenu, iconPanelMode, themeToggleMarkup } from "../icons";
 import { bindThemeToggleButtons } from "../theme";
@@ -44,6 +45,8 @@ import {
   saveWeixinSettings,
   startWeixinBind,
   unbindWeixin,
+  weixinBindStatusText,
+  weixinErrorText,
   type WeixinSettingsResponse,
 } from "../weixin";
 import { connectionStatusOffline } from "../connection_status";
@@ -57,11 +60,14 @@ let weixinBindGeneration = 0;
 let weixinState: WeixinSettingsResponse | null = null;
 type SidebarPage = "tabs" | "dashboard" | "settings";
 let sidebarPage: SidebarPage = "tabs";
-let currentConnectionStatus: ConnectionStatus = connectionStatusOffline("Not connected");
+const LANGUAGE_SETTINGS_RETURN_KEY = "wispterm.remote.languageSettingsReturn";
+let currentConnectionStatus: ConnectionStatus = connectionStatusOffline(tr("Not connected", "未连接"));
 let statusLatencyHideTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   cleanupWeixinPanel();
+  const returnToLanguageSettings = consumeLanguageSettingsReturn();
+  if (returnToLanguageSettings) sidebarPage = "settings";
 
   const savedSessionKey = readSavedSessionKey();
   const hasSavedSessionKey = savedSessionKey.length > 0;
@@ -75,43 +81,43 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
         <div class="sidebar-main">
           <div class="sidebar-head">
             <div class="sidebar-head-actions">
-              <button type="button" class="icon-button" id="drawer-close" aria-label="Close menu" title="Close menu">
+              <button type="button" class="icon-button" id="drawer-close" aria-label="${tr("Close menu", "关闭菜单")}" title="${tr("Close menu", "关闭菜单")}">
                 ${iconClose()}
               </button>
             </div>
           </div>
 
-          <nav class="sidebar-page-nav" aria-label="Remote sidebar pages">
-            <button type="button" class="sidebar-page-button${sidebarPage === "tabs" ? " active" : ""}" data-sidebar-page-target="tabs">Tabs</button>
-            <button type="button" class="sidebar-page-button${sidebarPage === "dashboard" ? " active" : ""}" data-sidebar-page-target="dashboard">Dashboard</button>
-            <button type="button" class="sidebar-page-button${sidebarPage === "settings" ? " active" : ""}" data-sidebar-page-target="settings">Settings</button>
+          <nav class="sidebar-page-nav" aria-label="${tr("Remote sidebar pages", "远程侧栏导航")}">
+            <button type="button" class="sidebar-page-button${sidebarPage === "tabs" ? " active" : ""}" data-sidebar-page-target="tabs">${tr("Tabs", "标签页")}</button>
+            <button type="button" class="sidebar-page-button${sidebarPage === "dashboard" ? " active" : ""}" data-sidebar-page-target="dashboard">${tr("Dashboard", "连接状态")}</button>
+            <button type="button" class="sidebar-page-button${sidebarPage === "settings" ? " active" : ""}" data-sidebar-page-target="settings">${tr("Settings", "设置")}</button>
           </nav>
 
           <div class="sidebar-page${sidebarPage === "tabs" ? " active" : ""}" data-sidebar-page="tabs">
           <div class="sidebar-section sidebar-tabs-section">
             <div class="sidebar-section-head">
               <div>
-                <div class="sidebar-section-title">Tabs</div>
+                <div class="sidebar-section-title">${tr("Tabs", "标签页")}</div>
               </div>
             </div>
             <div class="panel remote-tabs-panel" id="tabs-panel">
-              <div id="remote-tabs" class="remote-tabs empty">Waiting...</div>
+              <div id="remote-tabs" class="remote-tabs empty">${tr("Waiting...", "等待连接…")}</div>
             </div>
           </div>
           </div>
 
           <div class="sidebar-page${sidebarPage === "dashboard" ? " active" : ""}" data-sidebar-page="dashboard">
           <div class="sidebar-section">
-            <div class="sidebar-section-title">Dashboard</div>
+            <div class="sidebar-section-title">${tr("Dashboard", "连接状态")}</div>
             <div class="panel dashboard-panel" id="dashboard-panel">
               <div class="status-panel dashboard-status">
-                <button type="button" class="status-dot" id="status-dot" data-state="offline" aria-label="Not connected. Latency unavailable" title="Not connected. Latency unavailable"></button>
-                <span id="status-text">Not connected</span>
-                <span class="status-latency-detail" id="status-latency-detail" hidden aria-live="polite">Latency unavailable</span>
+                <button type="button" class="status-dot" id="status-dot" data-state="offline" aria-label="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}" title="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}"></button>
+                <span id="status-text">${tr("Not connected", "未连接")}</span>
+                <span class="status-latency-detail" id="status-latency-detail" hidden aria-live="polite">${tr("Latency unavailable", "暂无延迟数据")}</span>
               </div>
               <div class="dashboard-log">
-                <div class="panel-label">Activity</div>
-                <div id="notice-log" class="notice-log">No activity</div>
+                <div class="panel-label">${tr("Activity", "活动记录")}</div>
+                <div id="notice-log" class="notice-log">${tr("No activity", "暂无活动记录")}</div>
               </div>
             </div>
           </div>
@@ -119,15 +125,29 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
 
           <div class="sidebar-page settings-page${sidebarPage === "settings" ? " active" : ""}" data-sidebar-page="settings">
           <div class="sidebar-section settings-section">
-            <div class="sidebar-section-title">Settings</div>
+            <div class="sidebar-section-title">${tr("Settings", "设置")}</div>
+            <div class="panel language-panel">
+              <fieldset id="remote-language" class="language-options" aria-describedby="language-error">
+                <legend>${tr("Language", "语言")}</legend>
+                <label>
+                  <input type="radio" name="remote-language" value="en"${getLocale() === "en" ? " checked" : ""} />
+                  <span lang="en">English</span>
+                </label>
+                <label>
+                  <input type="radio" name="remote-language" value="zh-CN"${getLocale() === "zh-CN" ? " checked" : ""} />
+                  <span lang="zh-CN">简体中文</span>
+                </label>
+              </fieldset>
+              <output class="language-error" id="language-error" aria-live="polite"></output>
+            </div>
             <div class="panel settings-about-panel">
-              <div class="panel-label">About</div>
+              <div class="panel-label">${tr("About", "关于")}</div>
               <div class="brand settings-brand">${remoteBrandMarkup()}</div>
             </div>
             <div class="panel panel-mode-panel" id="desktop-panel-mode">
               <div class="settings-item-head">
                 <div>
-                  <div class="panel-label">Desktop display</div>
+                  <div class="panel-label">${tr("Desktop display", "桌面端显示")}</div>
                   <strong id="desktop-panel-mode-title">${desktopPanelModeTitle(state.desktopPanelMode)}</strong>
                 </div>
                 <span class="settings-item-badge" id="desktop-panel-mode-badge">${desktopPanelModeBadge(state.desktopPanelMode)}</span>
@@ -135,42 +155,42 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
               <p id="desktop-panel-mode-copy">${desktopPanelModeCopy(state.desktopPanelMode)}</p>
             </div>
             <details class="settings-group" open>
-              <summary>Remote connection</summary>
+              <summary>${tr("Remote connection", "远程连接")}</summary>
               <form id="connect-form" class="panel connect-panel">
-                <h1>Connect</h1>
+                <h1>${tr("Connect", "连接")}</h1>
                 <label>
-                  Session key
+                  ${tr("Session key", "会话密钥")}
                   <input name="session" spellcheck="false" autocomplete="off" value="${escapeText(initialSessionInputValue)}" required />
                 </label>
                 <div class="form-actions">
-                  <button type="submit">Connect</button>
-                  <button type="button" class="secondary-button" id="clear-session-button">Clear saved</button>
+                  <button type="submit">${tr("Connect", "连接")}</button>
+                  <button type="button" class="secondary-button" id="clear-session-button">${tr("Clear saved session key", "清除已保存密钥")}</button>
                 </div>
               </form>
             </details>
             <details class="settings-group">
-              <summary>Weixin</summary>
+              <summary>${tr("Weixin Direct", "微信直连")}</summary>
               <div class="panel weixin-panel" id="weixin-panel">
                 <div class="weixin-head">
-                  <div class="panel-label">Weixin</div>
-                  <span id="weixin-state-pill" class="weixin-state-pill" data-state="loading">Loading</span>
+                  <div class="panel-label">${tr("Weixin Direct", "微信直连")}</div>
+                  <span id="weixin-state-pill" class="weixin-state-pill" data-state="loading">${tr("Loading", "加载中")}</span>
                 </div>
-                <div id="weixin-status" class="weixin-status">Loading...</div>
+                <div id="weixin-status" class="weixin-status">${tr("Loading...", "加载中…")}</div>
                 <label class="weixin-switch">
                   <span class="weixin-switch-copy">
-                    <strong>Bridge</strong>
-                    <small id="weixin-enabled-copy">Off</small>
+                    <strong>${tr("Enable Weixin Direct", "启用微信直连")}</strong>
+                    <small id="weixin-enabled-copy">${tr("Off", "关闭")}</small>
                   </span>
                   <input id="weixin-enabled" type="checkbox" />
                   <span class="weixin-switch-track" aria-hidden="true"></span>
                 </label>
                 <label>
-                  Target session
+                  ${tr("Target session", "目标会话")}
                   <select id="weixin-target-session"></select>
                 </label>
                 <div class="form-actions">
-                  <button type="button" class="secondary-button" id="weixin-save">Save</button>
-                  <button type="button" class="secondary-button weixin-bind-toggle" id="weixin-bind-toggle" data-mode="bind">Bind</button>
+                  <button type="button" class="secondary-button" id="weixin-save">${tr("Save", "保存")}</button>
+                  <button type="button" class="secondary-button weixin-bind-toggle" id="weixin-bind-toggle" data-mode="bind">${tr("Bind", "绑定")}</button>
                 </div>
                 <div id="weixin-qr" class="weixin-qr" hidden></div>
               </div>
@@ -184,7 +204,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
             <span class="sidebar-user-avatar">P</span>
             <span class="sidebar-user-copy">
               <strong>WispTerm</strong>
-              <small>Remote console</small>
+              <small>${tr("Remote console", "远程控制台")}</small>
             </span>
           </div>
           <div class="sidebar-footer-actions">
@@ -192,34 +212,34 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
               ${iconPanelMode(state.desktopPanelMode)}
             </button>
             ${themeToggleMarkup("sidebar-footer-theme")}
-            <button class="ghost-button" id="logout-button">Sign out</button>
+            <button class="ghost-button" id="logout-button">${tr("Sign out", "退出登录")}</button>
           </div>
         </div>
       </aside>
       <section class="workspace">
         <header class="mobile-bar">
-          <button type="button" class="icon-button" id="drawer-open" aria-label="Open menu">
+          <button type="button" class="icon-button" id="drawer-open" aria-label="${tr("Open menu", "打开菜单")}">
             ${iconMenu()}
           </button>
           <div class="mobile-bar-main">
             <span class="mobile-bar-title" id="mobile-workspace-title">WispTerm Remote</span>
             <div class="mobile-surface-selector" id="mobile-surface-selector" data-collapsed="false" data-open="false" hidden>
-              <div class="mobile-surface-strip" id="mobile-surface-strip" aria-label="Surfaces"></div>
+              <div class="mobile-surface-strip" id="mobile-surface-strip" aria-label="${tr("Surfaces", "面板")}"></div>
               <button type="button" class="mobile-surface-menu-toggle" id="mobile-surface-menu-toggle" aria-expanded="false" aria-controls="mobile-surface-menu"></button>
               <div class="mobile-surface-menu" id="mobile-surface-menu" hidden></div>
             </div>
           </div>
-          <div class="mobile-chrome-controls" aria-label="Remote status controls">
-            <button type="button" class="status-pip" id="mobile-status-pip" data-state="offline" aria-label="Not connected. Latency unavailable" title="Not connected. Latency unavailable"></button>
-            <span class="status-latency-popover" id="mobile-status-latency" hidden aria-live="polite">Latency unavailable</span>
+          <div class="mobile-chrome-controls" aria-label="${tr("Remote controls", "远程连接控制")}">
+            <button type="button" class="status-pip" id="mobile-status-pip" data-state="offline" aria-label="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}" title="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}"></button>
+            <span class="status-latency-popover" id="mobile-status-latency" hidden aria-live="polite">${tr("Latency unavailable", "暂无延迟数据")}</span>
             <button type="button" class="mobile-zoom-toggle" id="mobile-zoom-toggle" data-zoom="${mobileVisualZoomPercent(state.mobileVisualZoom)}" aria-label="${mobileVisualZoomToggleLabel(state.mobileVisualZoom)}" title="${mobileVisualZoomToggleLabel(state.mobileVisualZoom)}">
               ${mobileVisualZoomCompactLabel(state.mobileVisualZoom)}
             </button>
             <button type="button" class="mobile-input-mode-toggle" id="mobile-input-mode-toggle" data-mode="${state.mobileInputMode}" aria-label="${mobileInputModeToggleLabel(state.mobileInputMode)}" title="${mobileInputModeToggleLabel(state.mobileInputMode)}">
               ${mobileInputModeLabel(state.mobileInputMode)}
             </button>
-            <button type="button" class="mobile-keyboard-toggle" id="kbd-toggle" aria-label="Toggle shortcut keyboard" title="Toggle shortcut keyboard">
-              Key
+            <button type="button" class="mobile-keyboard-toggle" id="kbd-toggle" aria-label="${tr("Toggle shortcut keyboard", "切换快捷键键盘")}" title="${tr("Toggle shortcut keyboard", "切换快捷键键盘")}">
+              ${tr("Key", "快捷键")}
             </button>
           </div>
         </header>
@@ -227,18 +247,18 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
         <section class="terminal-panel">
           <div class="terminal-toolbar">
             <div class="terminal-title-group">
-              <button type="button" class="icon-button desktop-sidebar-toggle" id="sidebar-expand" aria-label="Open sidebar" title="Open sidebar">
+              <button type="button" class="icon-button desktop-sidebar-toggle" id="sidebar-expand" aria-label="${tr("Open sidebar", "打开侧栏")}" title="${tr("Open sidebar", "打开侧栏")}">
                 ${iconMenu()}
               </button>
-              <span id="workspace-title">Remote workspace</span>
+              <span id="workspace-title">${tr("Remote workspace", "远程工作区")}</span>
             </div>
             <div class="terminal-actions">
-              <span class="control-state" id="control-state" data-state="granted">Input enabled</span>
-              <span class="toolbar-hint">Select panel</span>
+              <span class="control-state" id="control-state" data-state="granted">${tr("Input enabled", "可输入")}</span>
+              <span class="toolbar-hint">${tr("Select panel", "选择面板")}</span>
             </div>
           </div>
           <div id="remote-panels" class="panels-stage empty">
-            <div class="empty-state">No panels</div>
+            <div class="empty-state">${tr("No panels", "暂无面板")}</div>
           </div>
         </section>
       </section>
@@ -287,7 +307,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
     clearSessionKey();
     sessionKeyMasked = false;
     if (sessionInput) sessionInput.value = "";
-    pushNotice("Saved session key cleared.");
+    pushNotice(tr("Saved session key cleared.", "已清除保存的会话密钥。"));
     renderNotices();
   });
 
@@ -297,6 +317,13 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   bindMobileTextInput();
   bindThemeToggleButtons();
   bindSidebarPages();
+  bindLocalePicker();
+  if (returnToLanguageSettings) {
+    setSidebarPage("settings");
+    if (isMobileRemoteShell()) setDrawerOpen(true);
+    else setSidebarCollapsed(false);
+    document.querySelector<HTMLInputElement>("#remote-language input:checked")?.focus();
+  }
   bindDesktopPanelMode();
   bindWeixinPanel();
   bindStatusLatencyDisclosure();
@@ -313,7 +340,7 @@ export function setStatus(status: ConnectionStatus): void {
   const dot = document.querySelector<HTMLButtonElement>("#status-dot");
   const label = document.querySelector<HTMLSpanElement>("#status-text");
   const pip = document.querySelector<HTMLButtonElement>("#mobile-status-pip");
-  const accessibilityText = `${status.text}. ${status.detail}`;
+  const accessibilityText = `${status.text}${tr(".", "。")} ${status.detail}`;
   if (dot) {
     dot.dataset.state = status.kind;
     dot.title = accessibilityText;
@@ -332,7 +359,7 @@ export function renderNotices(): void {
   const root = document.querySelector<HTMLDivElement>("#notice-log");
   if (!root) return;
   if (state.notices.length === 0) {
-    root.textContent = "No activity";
+    root.textContent = tr("No activity", "暂无活动记录");
     return;
   }
   root.innerHTML = state.notices.map((notice) => `<div>${escapeText(notice)}</div>`).join("");
@@ -345,7 +372,7 @@ export function renderRemoteTabs(): void {
   const layout = state.layoutState;
   if (!layout || layout.tabs.length === 0) {
     tabsRoot.className = "remote-tabs empty";
-    tabsRoot.textContent = "Waiting...";
+    tabsRoot.textContent = tr("Waiting...", "等待连接…");
     return;
   }
 
@@ -353,7 +380,7 @@ export function renderRemoteTabs(): void {
   tabsRoot.innerHTML = layout.tabs
     .map((tab) => {
       const active = tab.index === state.selectedTabIndex ? " active" : "";
-      const title = escapeText(tab.title || `Tab ${tab.index + 1}`);
+      const title = escapeText(tab.title || tr(`Tab ${tab.index + 1}`, `标签页 ${tab.index + 1}`));
       return `<button type="button" class="tab-chip${active}" data-tab-index="${tab.index}"><span class="tab-chip-label">${title}</span><span class="tab-chip-count">${tab.surfaces.length}</span></button>`;
     })
     .join("");
@@ -435,7 +462,7 @@ function renderMobileSurfaceSelector(surfaces: LayoutSurface[]): void {
   selector.hidden = false;
   const activeSurface =
     surfaces.find((surface) => surface.id === state.selectedSurfaceId) ?? surfaces[0] ?? null;
-  const activeLabel = activeSurface ? activeSurface.title || shortSurfaceId(activeSurface.id) : "Surfaces";
+  const activeLabel = activeSurface ? activeSurface.title || shortSurfaceId(activeSurface.id) : tr("Surfaces", "面板");
   const activeLabelEscaped = escapeText(activeLabel);
 
   strip.innerHTML = surfaces
@@ -453,7 +480,7 @@ function renderMobileSurfaceSelector(surfaces: LayoutSurface[]): void {
     })
     .join("");
   toggle.innerHTML = `<span>${activeLabelEscaped}</span><span aria-hidden="true">▾</span>`;
-  toggle.setAttribute("aria-label", `Choose surface, current surface ${activeLabel}`);
+  toggle.setAttribute("aria-label", tr(`Choose surface, current surface ${activeLabel}`, `选择面板，当前为 ${activeLabel}`));
   toggle.onclick = () => {
     const open = selector.dataset.open === "true";
     setMobileSurfaceMenuOpen(!open);
@@ -526,10 +553,10 @@ export function updateInputUi(): void {
 
   if (label) {
     label.dataset.state = writable ? "granted" : "idle";
-    label.textContent = connected ? (writable ? "Input enabled" : "No input target") : "Input ready";
+    label.textContent = connected ? (writable ? tr("Input enabled", "可输入") : tr("No input target", "无可输入面板")) : tr("Input ready", "等待连接");
   }
   if (hint) {
-    hint.textContent = connected ? (writable ? "Select panel" : "No target") : "Connect first";
+    hint.textContent = connected ? (writable ? tr("Select panel", "选择面板") : tr("No target", "无目标")) : tr("Connect first", "请先连接");
   }
 
   updateSurfaceCursors();
@@ -556,8 +583,8 @@ function updateMobileSurfaceMode(): void {
     keyboardToggle.hidden = chatMode;
     keyboardToggle.setAttribute("aria-hidden", String(chatMode));
     keyboardToggle.disabled = state.mobileInputMode === "view";
-    const keyLabel = state.kbdVisible ? "Hide shortcut keyboard" : "Show shortcut keyboard";
-    const label = state.mobileInputMode === "view" ? "Switch to Edit to use shortcut keys" : keyLabel;
+    const keyLabel = state.kbdVisible ? tr("Hide shortcut keyboard", "隐藏快捷键键盘") : tr("Show shortcut keyboard", "显示快捷键键盘");
+    const label = state.mobileInputMode === "view" ? tr("Switch to Edit to use shortcut keys", "切换到编辑模式后使用快捷键") : keyLabel;
     keyboardToggle.setAttribute("aria-label", label);
     keyboardToggle.title = label;
   }
@@ -697,15 +724,20 @@ function syncMobileVisualZoomUi(): void {
 }
 
 function mobileInputModeLabel(mode: MobileInputMode): string {
-  return mode === "edit" ? "Edit" : "View";
+  return mode === "edit" ? tr("Edit", "编辑") : tr("View", "查看");
 }
 
 function mobileInputModeToggleLabel(mode: MobileInputMode): string {
-  return `Switch to ${mobileInputModeLabel(nextMobileInputMode(mode)).toLowerCase()} mode`;
+  return nextMobileInputMode(mode) === "edit"
+    ? tr("Switch to edit mode", "切换到编辑模式")
+    : tr("Switch to view mode", "切换到查看模式");
 }
 
 function mobileVisualZoomToggleLabel(zoom: MobileVisualZoom): string {
-  return `Switch terminal visual zoom to ${mobileVisualZoomLabel(nextMobileVisualZoom(zoom))}`;
+  return tr(
+    `Switch terminal visual zoom to ${mobileVisualZoomLabel(nextMobileVisualZoom(zoom))}`,
+    `将终端显示缩放切换为 ${mobileVisualZoomLabel(nextMobileVisualZoom(zoom))}`,
+  );
 }
 
 function mobileVisualZoomCompactLabel(zoom: MobileVisualZoom): string {
@@ -715,6 +747,38 @@ function mobileVisualZoomCompactLabel(zoom: MobileVisualZoom): string {
 
 function nextMobileInputMode(mode: MobileInputMode): MobileInputMode {
   return mode === "edit" ? "view" : "edit";
+}
+
+function consumeLanguageSettingsReturn(): boolean {
+  try {
+    const shouldReturn = sessionStorage.getItem(LANGUAGE_SETTINGS_RETURN_KEY) === "1";
+    sessionStorage.removeItem(LANGUAGE_SETTINGS_RETURN_KEY);
+    return shouldReturn;
+  } catch {
+    return false;
+  }
+}
+
+function bindLocalePicker(): void {
+  const picker = document.querySelector<HTMLElement>("#remote-language");
+  picker?.addEventListener("change", (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || !isRemoteLocale(input.value) || input.value === getLocale()) return;
+    const previous = getLocale();
+    if (!setLocale(input.value)) {
+      const selected = picker.querySelector<HTMLInputElement>(`input[value="${previous}"]`);
+      if (selected) selected.checked = true;
+      const error = document.querySelector<HTMLOutputElement>("#language-error");
+      if (error) error.textContent = tr("Could not save the language preference.", "无法保存语言设置。");
+      return;
+    }
+    try {
+      sessionStorage.setItem(LANGUAGE_SETTINGS_RETURN_KEY, "1");
+    } catch {
+      // The saved language still applies if the Settings page cannot be restored.
+    }
+    window.location.reload();
+  });
 }
 
 function bindSidebarPages(): void {
@@ -780,20 +844,20 @@ function syncDesktopPanelModeUi(mode: DesktopPanelMode): void {
 }
 
 function desktopPanelModeTitle(mode: DesktopPanelMode): string {
-  return mode === "layout" ? "Mirror layout" : "Focused panels";
+  return mode === "layout" ? tr("Mirror layout", "镜像布局") : tr("Focused panels", "单面板显示");
 }
 
 function desktopPanelModeBadge(mode: DesktopPanelMode): string {
-  return mode === "layout" ? "Layout" : "Focused";
+  return mode === "layout" ? tr("Layout", "布局") : tr("Focused", "单面板");
 }
 
 function desktopPanelModeCopy(mode: DesktopPanelMode): string {
-  if (mode === "layout") return "Local split layout.";
-  return "One panel at a time.";
+  if (mode === "layout") return tr("Local split layout.", "按桌面端的分屏布局显示。");
+  return tr("One panel at a time.", "每次显示一个面板。");
 }
 
 function desktopPanelModeToggleLabel(mode: DesktopPanelMode): string {
-  return mode === "layout" ? "Switch desktop tabs to focused panels" : "Switch desktop tabs to mirror layout";
+  return mode === "layout" ? tr("Switch desktop tabs to focused panels", "切换到单面板显示") : tr("Switch desktop tabs to mirror layout", "切换到镜像布局");
 }
 
 function bindViewportRefit(): void {
@@ -814,7 +878,7 @@ function bindViewportRefit(): void {
 function bindWeixinPanel(): void {
   document.querySelector<HTMLInputElement>("#weixin-enabled")?.addEventListener("change", (event) => {
     const copy = document.querySelector<HTMLElement>("#weixin-enabled-copy");
-    if (copy) copy.textContent = (event.currentTarget as HTMLInputElement).checked ? "On" : "Off";
+    if (copy) copy.textContent = (event.currentTarget as HTMLInputElement).checked ? tr("On", "开启") : tr("Off", "关闭");
   });
   document.querySelector<HTMLButtonElement>("#weixin-save")?.addEventListener("click", () => {
     void saveWeixinPanel();
@@ -898,7 +962,7 @@ async function refreshWeixinPanel(generation = weixinBindGeneration): Promise<vo
     renderWeixinPanel();
   } catch (error) {
     if (!isCurrentWeixinBindGeneration(generation)) return;
-    if (status) status.textContent = error instanceof Error ? error.message : "Load failed";
+    if (status) status.textContent = weixinErrorText(error, tr("Load failed", "加载失败"));
   }
 }
 
@@ -916,10 +980,10 @@ function renderWeixinPanel(): void {
   if (status) status.textContent = bridgeStatusText(weixinState.settings, weixinState.binding);
   if (pill) {
     pill.dataset.state = state;
-    pill.textContent = state === "ready" ? "Ready" : state === "disabled" ? "Disabled" : "Not bound";
+    pill.textContent = state === "ready" ? tr("Ready", "已就绪") : state === "disabled" ? tr("Disabled", "已停用") : tr("Not bound", "未绑定");
   }
   if (enabled) enabled.checked = weixinState.settings.enabled;
-  if (enabledCopy) enabledCopy.textContent = weixinState.settings.enabled ? "On" : "Off";
+  if (enabledCopy) enabledCopy.textContent = weixinState.settings.enabled ? tr("On", "开启") : tr("Off", "关闭");
   if (bindToggle) {
     const bound = weixinState.binding.bound;
     bindToggle.textContent = bindActionText(weixinState.binding);
@@ -933,9 +997,9 @@ function renderWeixinPanel(): void {
     }
 
     target.innerHTML = [
-      `<option value="">No target</option>`,
+      `<option value="">${tr("No target", "未选择目标")}</option>`,
       ...sessions.map((session) => {
-        const connected = session.connected ? "connected" : "offline";
+        const connected = session.connected ? tr("connected", "已连接") : tr("offline", "离线");
         return `<option value="${escapeText(session.key)}"${session.key === selected ? " selected" : ""}>${escapeText(maskSessionKey(session.key))} (${connected})</option>`;
       }),
     ].join("");
@@ -954,7 +1018,7 @@ async function saveWeixinPanel(): Promise<void> {
   const target = document.querySelector("#weixin-target-session") as HTMLSelectElement | null;
   if (!enabled || !target) return;
 
-  if (status) status.textContent = "Saving...";
+  if (status) status.textContent = tr("Saving...", "保存中…");
   const generation = weixinBindGeneration;
   try {
     const settings = normalizeWeixinSettings({
@@ -967,7 +1031,7 @@ async function saveWeixinPanel(): Promise<void> {
     await refreshWeixinPanel(generation);
   } catch (error) {
     if (!isCurrentWeixinBindGeneration(generation)) return;
-    if (status) status.textContent = error instanceof Error ? error.message : "Save failed";
+    if (status) status.textContent = weixinErrorText(error, tr("Save failed", "保存失败"));
   }
 }
 
@@ -980,19 +1044,19 @@ async function startWeixinPanelBind(): Promise<void> {
     weixinBindTimer = null;
   }
 
-  if (status) status.textContent = "Starting...";
+  if (status) status.textContent = tr("Starting...", "正在启动绑定…");
   try {
     const binding = await startWeixinBind();
     if (!isCurrentWeixinBindGeneration(generation)) return;
     if (qr) {
       qr.hidden = false;
-      qr.innerHTML = `<img src="${escapeText(binding.qrcode_data_url)}" alt="Weixin bind QR code" /><div>${escapeText(binding.status)}</div>`;
+      qr.innerHTML = `<img src="${escapeText(binding.qrcode_data_url)}" alt="${tr("Weixin bind QR code", "微信绑定二维码")}" /><div>${escapeText(weixinBindStatusText(binding.status))}</div>`;
     }
-    if (status) status.textContent = "Waiting...";
+    if (status) status.textContent = weixinBindStatusText(binding.status);
     scheduleWeixinBindPoll(binding.qrcode, generation);
   } catch (error) {
     if (!isCurrentWeixinBindGeneration(generation)) return;
-    if (status) status.textContent = error instanceof Error ? error.message : "Bind failed";
+    if (status) status.textContent = weixinErrorText(error, tr("Bind failed", "绑定失败"));
   }
 }
 
@@ -1019,15 +1083,15 @@ function scheduleWeixinBindPoll(qrcode: string, generation: number): void {
         }
 
         if (next.status === "expired" || next.status === "failed") {
-          if (status) status.textContent = next.message ?? "Stopped";
+          if (status) status.textContent = weixinBindStatusText(next.status, next.message);
           return;
         }
 
-        if (status) status.textContent = next.message ?? "Waiting...";
+        if (status) status.textContent = weixinBindStatusText(next.status, next.message);
         scheduleWeixinBindPoll(qrcode, generation);
       } catch (error) {
         if (!isCurrentWeixinBindGeneration(generation)) return;
-        if (status) status.textContent = error instanceof Error ? error.message : "Check failed";
+        if (status) status.textContent = weixinErrorText(error, tr("Check failed", "检查绑定状态失败"));
       }
     })();
   }, 2000);
@@ -1046,14 +1110,14 @@ async function unbindWeixinPanel(): Promise<void> {
     qr.replaceChildren();
   }
 
-  if (status) status.textContent = "Unbinding Weixin...";
+  if (status) status.textContent = tr("Unbinding Weixin...", "正在解绑微信…");
   try {
     await unbindWeixin();
     if (!isCurrentWeixinBindGeneration(generation)) return;
     await refreshWeixinPanel(generation);
   } catch (error) {
     if (!isCurrentWeixinBindGeneration(generation)) return;
-    if (status) status.textContent = error instanceof Error ? error.message : "Unbind failed";
+    if (status) status.textContent = weixinErrorText(error, tr("Unbind failed", "解绑失败"));
   }
 }
 
