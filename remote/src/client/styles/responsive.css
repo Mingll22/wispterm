@@ -35,7 +35,8 @@
     overflow: hidden;
     z-index: 90;
     transform: translateX(-102%);
-    transition: transform 220ms cubic-bezier(0.2, 0.7, 0.2, 1);
+    visibility: hidden;
+    transition: transform 160ms ease, visibility 160ms;
     border-right: 1px solid var(--line);
     border-bottom: 0;
     box-shadow: var(--shadow-drawer);
@@ -47,6 +48,7 @@
 
   .console-shell[data-drawer-open="true"] .sidebar {
     transform: translateX(0);
+    visibility: visible;
   }
 
   .sidebar-head .icon-button {
@@ -119,6 +121,15 @@
     padding: 12px max(14px, var(--safe-right)) max(14px, var(--safe-bottom)) max(14px, var(--safe-left));
   }
 
+  #desktop-panel-mode,
+  #desktop-panel-mode-toggle {
+    display: none;
+  }
+
+  .sidebar-footer-actions {
+    grid-template-columns: 42px minmax(0, 1fr);
+  }
+
   .remote-tabs-panel {
     flex: 0 0 auto;
     min-width: 0;
@@ -132,8 +143,8 @@
   }
 
   .tab-chip {
-    min-height: 56px;
-    padding: 10px 12px;
+    min-height: 44px;
+    padding: 8px 10px;
     border-radius: var(--radius-sm);
   }
 
@@ -174,8 +185,7 @@
     padding: 4px max(10px, var(--safe-right)) 4px max(10px, var(--safe-left));
     padding-top: max(4px, var(--safe-top));
     border-bottom: 1px solid var(--line);
-    background: var(--surface-overlay-strong);
-    backdrop-filter: blur(20px);
+    background: var(--panel-strong);
     overflow: visible;
   }
 
@@ -203,7 +213,7 @@
 
   .mobile-bar-main .mobile-bar-title {
     flex: 0 1 auto;
-    max-width: min(92px, 34vw);
+    max-width: 100%;
   }
 
   .mobile-chrome-controls {
@@ -215,12 +225,6 @@
     gap: 6px;
   }
 
-  .mobile-chrome-controls .status-pip {
-    flex: 0 0 auto;
-    width: 12px;
-    height: 12px;
-  }
-
   .mobile-input-mode-toggle,
   .mobile-zoom-toggle,
   .mobile-keyboard-toggle {
@@ -229,7 +233,7 @@
     display: inline-grid;
     place-items: center;
     flex: 0 0 auto;
-    height: 32px;
+    height: 36px;
     min-width: 32px;
     padding: 0 7px;
     border: 1px solid var(--line);
@@ -278,9 +282,7 @@
     cursor: default;
   }
 
-  .console-shell[data-mobile-surface-kind="ai_chat"] #mobile-zoom-toggle,
-  .console-shell[data-mobile-surface-kind="ai_chat"] #mobile-input-mode-toggle,
-  .console-shell[data-mobile-surface-kind="ai_chat"] #kbd-toggle {
+  .console-shell:is([data-mobile-surface-kind="ai_chat"], [data-mobile-surface-kind="none"]) :is(#mobile-zoom-toggle, #mobile-input-mode-toggle, #kbd-toggle) {
     display: none;
   }
 
@@ -295,6 +297,11 @@
     padding: 6px;
     padding-right: max(6px, var(--safe-right));
     padding-left: max(6px, var(--safe-left));
+  }
+
+  .terminal-panel > .panels-stage,
+  .connection-empty {
+    grid-row: 1;
   }
 
   .panels-stage {
@@ -443,10 +450,6 @@
     touch-action: none;
   }
 
-  .panels-stage[data-mobile-mode="single"] .terminal-mount::after {
-    display: none;
-  }
-
   .panels-stage[data-mobile-mode="single"] .terminal-host {
     overflow: visible;
     touch-action: none;
@@ -528,10 +531,6 @@
   }
 
   .console-shell[data-mobile-surface-kind="ai_chat"] .panels-stage[data-mobile-mode="single"] .remote-panel::before,
-  .console-shell[data-mobile-surface-kind="ai_chat"] .panels-stage[data-mobile-mode="single"] .terminal-mount::after {
-    display: none;
-  }
-
   .console-shell[data-mobile-surface-kind="ai_chat"] .panels-stage[data-mobile-mode="single"] .terminal-mount {
     padding: 0;
     border-radius: 0;

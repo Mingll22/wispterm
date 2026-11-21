@@ -10,8 +10,8 @@ test("remote tab selection closes the mobile drawer", () => {
   assert.equal(remoteTabSelectionSidebarAction(true), "close-drawer");
 });
 
-test("remote tab selection collapses the desktop sidebar", () => {
-  assert.equal(remoteTabSelectionSidebarAction(false), "collapse-sidebar");
+test("remote tab selection keeps the desktop sidebar open", () => {
+  assert.equal(remoteTabSelectionSidebarAction(false), "keep-sidebar");
 });
 
 test("remote tab clicks apply the sidebar selection action after switching workspace", async () => {

@@ -9,12 +9,11 @@ import {
   readSavedSessionKey,
   saveDesktopPanelMode,
   saveMobileVisualZoom,
-  saveSessionKey,
   saveSidebarCollapsed,
 } from "../storage";
 import { escapeText, shortSurfaceId } from "../utils";
 import { api, connect, disconnect } from "../transport";
-import { remoteBrandMarkup } from "../version";
+import { webVersionLabel } from "../version";
 import {
   disposeSurfaceViews,
   focusAndFitSelectedSurface,
@@ -61,7 +60,7 @@ let weixinState: WeixinSettingsResponse | null = null;
 type SidebarPage = "tabs" | "dashboard" | "settings";
 let sidebarPage: SidebarPage = "tabs";
 const LANGUAGE_SETTINGS_RETURN_KEY = "wispterm.remote.languageSettingsReturn";
-let currentConnectionStatus: ConnectionStatus = connectionStatusOffline(tr("Not connected", "未连接"));
+let currentConnectionStatus: ConnectionStatus = connectionStatusOffline(tr("Offline", "未连接"));
 let statusLatencyHideTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function renderConsole(app: HTMLElement, onLogout: () => void): void {
@@ -80,6 +79,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-main">
           <div class="sidebar-head">
+            <span class="sidebar-wordmark">WispTerm</span>
             <div class="sidebar-head-actions">
               <button type="button" class="icon-button" id="drawer-close" aria-label="${tr("Close menu", "关闭菜单")}" title="${tr("Close menu", "关闭菜单")}">
                 ${iconClose()}
@@ -89,43 +89,36 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
 
           <nav class="sidebar-page-nav" aria-label="${tr("Remote sidebar pages", "远程侧栏导航")}">
             <button type="button" class="sidebar-page-button${sidebarPage === "tabs" ? " active" : ""}" data-sidebar-page-target="tabs">${tr("Tabs", "标签页")}</button>
-            <button type="button" class="sidebar-page-button${sidebarPage === "dashboard" ? " active" : ""}" data-sidebar-page-target="dashboard">${tr("Dashboard", "连接状态")}</button>
+            <button type="button" class="sidebar-page-button${sidebarPage === "dashboard" ? " active" : ""}" data-sidebar-page-target="dashboard">${tr("Connect", "连接")}</button>
             <button type="button" class="sidebar-page-button${sidebarPage === "settings" ? " active" : ""}" data-sidebar-page-target="settings">${tr("Settings", "设置")}</button>
           </nav>
 
           <div class="sidebar-page${sidebarPage === "tabs" ? " active" : ""}" data-sidebar-page="tabs">
-          <div class="sidebar-section sidebar-tabs-section">
-            <div class="sidebar-section-head">
-              <div>
-                <div class="sidebar-section-title">${tr("Tabs", "标签页")}</div>
-              </div>
-            </div>
-            <div class="panel remote-tabs-panel" id="tabs-panel">
-              <div id="remote-tabs" class="remote-tabs empty">${tr("Waiting...", "等待连接…")}</div>
-            </div>
-          </div>
+            <div id="remote-tabs" class="remote-tabs empty">${tr("Connect WispTerm to see its tabs", "连接桌面端后显示标签页")}</div>
           </div>
 
           <div class="sidebar-page${sidebarPage === "dashboard" ? " active" : ""}" data-sidebar-page="dashboard">
-          <div class="sidebar-section">
-            <div class="sidebar-section-title">${tr("Dashboard", "连接状态")}</div>
-            <div class="panel dashboard-panel" id="dashboard-panel">
-              <div class="status-panel dashboard-status">
-                <button type="button" class="status-dot" id="status-dot" data-state="offline" aria-label="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}" title="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}"></button>
-                <span id="status-text">${tr("Not connected", "未连接")}</span>
-                <span class="status-latency-detail" id="status-latency-detail" hidden aria-live="polite">${tr("Latency unavailable", "暂无延迟数据")}</span>
-              </div>
-              <div class="dashboard-log">
-                <div class="panel-label">${tr("Activity", "活动记录")}</div>
-                <div id="notice-log" class="notice-log">${tr("No activity", "暂无活动记录")}</div>
-              </div>
+            <div class="status-panel dashboard-status">
+              <button type="button" class="status-dot" id="status-dot" data-state="offline" aria-label="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}" title="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}"></button>
+              <span id="status-text" aria-live="polite">${tr("Offline", "未连接")}</span>
+              <span class="status-latency-detail" id="status-latency-detail" hidden>${tr("Latency unavailable", "暂无延迟数据")}</span>
             </div>
-          </div>
+            <form id="connect-form" class="connect-panel">
+              <label for="session-key">${tr("Session key", "会话密钥")}</label>
+              <input id="session-key" name="session" type="password" spellcheck="false" autocomplete="off" value="${escapeText(initialSessionInputValue)}" required />
+              <div class="form-actions connect-actions">
+                <button type="submit">${tr("Connect", "连接")}</button>
+                <button type="button" class="secondary-button" id="clear-session-button" ${hasSavedSessionKey ? "" : "hidden"}>${tr("Forget key", "断开并忘记")}</button>
+              </div>
+            </form>
+            <details class="settings-group">
+              <summary>${tr("Connection log", "连接记录")}</summary>
+              <div id="notice-log" class="notice-log">${tr("No connection activity", "暂无连接记录")}</div>
+            </details>
           </div>
 
           <div class="sidebar-page settings-page${sidebarPage === "settings" ? " active" : ""}" data-sidebar-page="settings">
           <div class="sidebar-section settings-section">
-            <div class="sidebar-section-title">${tr("Settings", "设置")}</div>
             <div class="panel language-panel">
               <fieldset id="remote-language" class="language-options" aria-describedby="language-error">
                 <legend>${tr("Language", "语言")}</legend>
@@ -140,34 +133,15 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
               </fieldset>
               <output class="language-error" id="language-error" aria-live="polite"></output>
             </div>
-            <div class="panel settings-about-panel">
-              <div class="panel-label">${tr("About", "关于")}</div>
-              <div class="brand settings-brand">${remoteBrandMarkup()}</div>
-            </div>
             <div class="panel panel-mode-panel" id="desktop-panel-mode">
               <div class="settings-item-head">
                 <div>
                   <div class="panel-label">${tr("Desktop display", "桌面端显示")}</div>
                   <strong id="desktop-panel-mode-title">${desktopPanelModeTitle(state.desktopPanelMode)}</strong>
                 </div>
-                <span class="settings-item-badge" id="desktop-panel-mode-badge">${desktopPanelModeBadge(state.desktopPanelMode)}</span>
               </div>
               <p id="desktop-panel-mode-copy">${desktopPanelModeCopy(state.desktopPanelMode)}</p>
             </div>
-            <details class="settings-group" open>
-              <summary>${tr("Remote connection", "远程连接")}</summary>
-              <form id="connect-form" class="panel connect-panel">
-                <h1>${tr("Connect", "连接")}</h1>
-                <label>
-                  ${tr("Session key", "会话密钥")}
-                  <input name="session" spellcheck="false" autocomplete="off" value="${escapeText(initialSessionInputValue)}" required />
-                </label>
-                <div class="form-actions">
-                  <button type="submit">${tr("Connect", "连接")}</button>
-                  <button type="button" class="secondary-button" id="clear-session-button">${tr("Clear saved session key", "清除已保存密钥")}</button>
-                </div>
-              </form>
-            </details>
             <details class="settings-group">
               <summary>${tr("Weixin Direct", "微信直连")}</summary>
               <div class="panel weixin-panel" id="weixin-panel">
@@ -195,18 +169,12 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
                 <div id="weixin-qr" class="weixin-qr" hidden></div>
               </div>
             </details>
+            <div class="settings-version">${escapeText(webVersionLabel())}</div>
           </div>
           </div>
         </div>
 
         <div class="sidebar-footer">
-          <div class="sidebar-user">
-            <span class="sidebar-user-avatar">P</span>
-            <span class="sidebar-user-copy">
-              <strong>WispTerm</strong>
-              <small>${tr("Remote console", "远程控制台")}</small>
-            </span>
-          </div>
           <div class="sidebar-footer-actions">
             <button type="button" class="icon-button panel-mode-toggle" id="desktop-panel-mode-toggle" aria-label="${desktopPanelModeToggleLabel(state.desktopPanelMode)}" title="${desktopPanelModeToggleLabel(state.desktopPanelMode)}">
               ${iconPanelMode(state.desktopPanelMode)}
@@ -218,11 +186,11 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
       </aside>
       <section class="workspace">
         <header class="mobile-bar">
-          <button type="button" class="icon-button" id="drawer-open" aria-label="${tr("Open menu", "打开菜单")}">
+          <button type="button" class="icon-button" id="drawer-open" aria-label="${tr("Open menu", "打开菜单")}" aria-controls="sidebar" aria-expanded="${state.drawerOpen}">
             ${iconMenu()}
           </button>
           <div class="mobile-bar-main">
-            <span class="mobile-bar-title" id="mobile-workspace-title">WispTerm Remote</span>
+            <span class="mobile-bar-title" id="mobile-workspace-title">${tr("Remote terminal", "远程终端")}</span>
             <div class="mobile-surface-selector" id="mobile-surface-selector" data-collapsed="false" data-open="false" hidden>
               <div class="mobile-surface-strip" id="mobile-surface-strip" aria-label="${tr("Surfaces", "面板")}"></div>
               <button type="button" class="mobile-surface-menu-toggle" id="mobile-surface-menu-toggle" aria-expanded="false" aria-controls="mobile-surface-menu"></button>
@@ -230,7 +198,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
             </div>
           </div>
           <div class="mobile-chrome-controls" aria-label="${tr("Remote controls", "远程连接控制")}">
-            <button type="button" class="status-pip" id="mobile-status-pip" data-state="offline" aria-label="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}" title="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}"></button>
+            <button type="button" class="status-pip" id="mobile-status-pip" data-state="offline" aria-label="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}" title="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}">${tr("Offline", "未连接")}</button>
             <span class="status-latency-popover" id="mobile-status-latency" hidden aria-live="polite">${tr("Latency unavailable", "暂无延迟数据")}</span>
             <button type="button" class="mobile-zoom-toggle" id="mobile-zoom-toggle" data-zoom="${mobileVisualZoomPercent(state.mobileVisualZoom)}" aria-label="${mobileVisualZoomToggleLabel(state.mobileVisualZoom)}" title="${mobileVisualZoomToggleLabel(state.mobileVisualZoom)}">
               ${mobileVisualZoomCompactLabel(state.mobileVisualZoom)}
@@ -239,7 +207,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
               ${mobileInputModeLabel(state.mobileInputMode)}
             </button>
             <button type="button" class="mobile-keyboard-toggle" id="kbd-toggle" aria-label="${tr("Toggle shortcut keyboard", "切换快捷键键盘")}" title="${tr("Toggle shortcut keyboard", "切换快捷键键盘")}">
-              ${tr("Key", "快捷键")}
+              ${tr("Keys", "快捷键")}
             </button>
           </div>
         </header>
@@ -253,12 +221,17 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
               <span id="workspace-title">${tr("Remote workspace", "远程工作区")}</span>
             </div>
             <div class="terminal-actions">
-              <span class="control-state" id="control-state" data-state="granted">${tr("Input enabled", "可输入")}</span>
-              <span class="toolbar-hint">${tr("Select panel", "选择面板")}</span>
+              <span class="workspace-status" id="workspace-status" data-state="offline">${tr("Offline", "未连接")}</span>
+              <span class="control-state" id="control-state" hidden>${tr("Read only", "只读")}</span>
             </div>
           </div>
-          <div id="remote-panels" class="panels-stage empty">
-            <div class="empty-state">${tr("No panels", "暂无面板")}</div>
+          <div id="remote-panels" class="panels-stage empty"></div>
+          <div class="connection-empty" id="connection-empty">
+            <div class="connection-empty-content">
+              <h2 id="connection-empty-title">${tr("Connect WispTerm", "连接桌面终端")}</h2>
+              <p id="connection-empty-help">${tr("Use the session key from the WispTerm desktop app.", "使用桌面端 WispTerm 的会话密钥。")}</p>
+              <button type="button" id="open-connection">${tr("Open connection", "打开连接")}</button>
+            </div>
           </div>
         </section>
       </section>
@@ -280,10 +253,14 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
     const form = event.currentTarget as HTMLFormElement;
     const data = new FormData(form);
     const typedValue = String(data.get("session") ?? "").trim();
-    const sessionKey = sessionKeyMasked && savedSessionKey ? savedSessionKey : typedValue;
-    saveSessionKey(sessionKey);
-    setDrawerOpen(false);
+    const sessionKey = sessionKeyMasked ? readSavedSessionKey() : typedValue;
+    if (!sessionKey) return;
     connect(sessionKey);
+    form.querySelector<HTMLInputElement>("input[name='session']")?.blur();
+    if (sessionInput) sessionInput.value = maskSessionKey(sessionKey);
+    sessionKeyMasked = true;
+    if (clearSessionButton) clearSessionButton.hidden = false;
+    setDrawerOpen(false);
   });
 
   const sessionInput = document.querySelector<HTMLInputElement>("#connect-form input[name='session']");
@@ -294,21 +271,27 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   };
   sessionInput?.addEventListener("focus", revealSessionInput);
   sessionInput?.addEventListener("pointerdown", revealSessionInput);
-  sessionInput?.addEventListener("input", () => {
-    if (sessionKeyMasked) return;
-    saveSessionKey(sessionInput.value.trim());
-  });
-  sessionInput?.addEventListener("change", () => {
-    if (sessionKeyMasked) return;
-    saveSessionKey(sessionInput.value.trim());
-  });
-
-  document.querySelector<HTMLButtonElement>("#clear-session-button")?.addEventListener("click", () => {
+  const clearSessionButton = document.querySelector<HTMLButtonElement>("#clear-session-button");
+  clearSessionButton?.addEventListener("click", () => {
     clearSessionKey();
     sessionKeyMasked = false;
     if (sessionInput) sessionInput.value = "";
+    disconnect();
+    state.layoutState = null;
+    state.selectedSurfaceId = null;
+    disposeSurfaceViews();
+    renderRemoteWorkspace();
+    clearSessionButton.hidden = true;
+    sessionInput?.focus();
     pushNotice(tr("Saved session key cleared.", "已清除保存的会话密钥。"));
     renderNotices();
+  });
+
+  document.querySelector<HTMLButtonElement>("#open-connection")?.addEventListener("click", () => {
+    setSidebarPage("dashboard");
+    if (isMobileRemoteShell()) setDrawerOpen(true);
+    else setSidebarCollapsed(false);
+    document.querySelector<HTMLButtonElement>('[data-sidebar-page-target="dashboard"]')?.focus();
   });
 
   bindMobileChrome();
@@ -317,6 +300,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   bindMobileTextInput();
   bindThemeToggleButtons();
   bindSidebarPages();
+  setSidebarPage(sidebarPage);
   bindLocalePicker();
   if (returnToLanguageSettings) {
     setSidebarPage("settings");
@@ -340,7 +324,17 @@ export function setStatus(status: ConnectionStatus): void {
   const dot = document.querySelector<HTMLButtonElement>("#status-dot");
   const label = document.querySelector<HTMLSpanElement>("#status-text");
   const pip = document.querySelector<HTMLButtonElement>("#mobile-status-pip");
-  const accessibilityText = `${status.text}${tr(".", "。")} ${status.detail}`;
+  const accessibilityText = `${status.text}。 ${status.detail}`;
+  const workspaceStatus = document.querySelector<HTMLSpanElement>("#workspace-status");
+  const shortLabel =
+    status.kind === "online" ? tr("Online", "已连接") :
+    status.kind === "high-latency" ? tr("Slow", "高延迟") :
+    status.kind === "connecting" ? tr("Linking", "连接中") : tr("Offline", "未连接");
+  if (workspaceStatus) {
+    workspaceStatus.dataset.state = status.kind;
+    workspaceStatus.textContent = shortLabel;
+    workspaceStatus.title = accessibilityText;
+  }
   if (dot) {
     dot.dataset.state = status.kind;
     dot.title = accessibilityText;
@@ -349,6 +343,7 @@ export function setStatus(status: ConnectionStatus): void {
   if (label) label.textContent = status.text;
   if (pip) {
     pip.dataset.state = status.kind;
+    pip.textContent = shortLabel;
     pip.title = accessibilityText;
     pip.setAttribute("aria-label", accessibilityText);
   }
@@ -359,7 +354,7 @@ export function renderNotices(): void {
   const root = document.querySelector<HTMLDivElement>("#notice-log");
   if (!root) return;
   if (state.notices.length === 0) {
-    root.textContent = tr("No activity", "暂无活动记录");
+    root.textContent = tr("No connection activity", "暂无连接记录");
     return;
   }
   root.innerHTML = state.notices.map((notice) => `<div>${escapeText(notice)}</div>`).join("");
@@ -372,39 +367,59 @@ export function renderRemoteTabs(): void {
   const layout = state.layoutState;
   if (!layout || layout.tabs.length === 0) {
     tabsRoot.className = "remote-tabs empty";
-    tabsRoot.textContent = tr("Waiting...", "等待连接…");
+    tabsRoot.textContent = tr("Connect WispTerm to see its tabs", "连接桌面端后显示标签页");
     return;
   }
 
+  if (tabsRoot.classList.contains("empty")) tabsRoot.replaceChildren();
   tabsRoot.className = "remote-tabs";
-  tabsRoot.innerHTML = layout.tabs
-    .map((tab) => {
-      const active = tab.index === state.selectedTabIndex ? " active" : "";
-      const title = escapeText(tab.title || tr(`Tab ${tab.index + 1}`, `标签页 ${tab.index + 1}`));
-      return `<button type="button" class="tab-chip${active}" data-tab-index="${tab.index}"><span class="tab-chip-label">${title}</span><span class="tab-chip-count">${tab.surfaces.length}</span></button>`;
-    })
-    .join("");
+  const existing = new Map(
+    Array.from(tabsRoot.querySelectorAll<HTMLButtonElement>("[data-tab-index]"))
+      .map((button) => [Number(button.dataset.tabIndex), button]),
+  );
 
-  tabsRoot.querySelectorAll<HTMLButtonElement>("[data-tab-index]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.selectedTabIndex = Number(button.dataset.tabIndex);
-      const layoutNow = state.layoutState;
-      const activeTab = layoutNow?.tabs.find((tab) => tab.index === state.selectedTabIndex) ?? null;
-      state.selectedSurfaceId =
-        activeTab?.focusedSurfaceId ?? activeTab?.surfaces[0]?.id ?? state.selectedSurfaceId;
-      renderRemoteWorkspace();
-      applyRemoteTabSelectionSidebarAction();
-    });
+  layout.tabs.forEach((tab, position) => {
+    let button = existing.get(tab.index);
+    if (!button) {
+      button = document.createElement("button");
+      button.type = "button";
+      button.className = "tab-chip";
+      button.dataset.tabIndex = String(tab.index);
+      button.innerHTML = '<span class="tab-chip-label"></span><span class="tab-chip-count"></span>';
+      button.addEventListener("click", () => {
+        state.selectedTabIndex = tab.index;
+        const activeTab = currentTab();
+        state.selectedSurfaceId =
+          activeTab?.focusedSurfaceId ?? activeTab?.surfaces[0]?.id ?? state.selectedSurfaceId;
+        renderRemoteWorkspace();
+        applyRemoteTabSelectionSidebarAction();
+      });
+    }
+    existing.delete(tab.index);
+
+    const active = tab.index === state.selectedTabIndex;
+    const title = tab.title || tr(`Tab ${tab.index + 1}`, `标签页 ${tab.index + 1}`);
+    const count = tab.surfaces.length;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+    button.title = title;
+    const label = button.querySelector<HTMLElement>(".tab-chip-label");
+    if (label && label.textContent !== title) label.textContent = title;
+    const countLabel = button.querySelector<HTMLElement>(".tab-chip-count");
+    if (countLabel) {
+      countLabel.hidden = count <= 1;
+      countLabel.title = tr("Panels", "面板数量");
+      if (countLabel.textContent !== String(count)) countLabel.textContent = String(count);
+    }
+    const before = tabsRoot.children[position] ?? null;
+    if (before !== button) tabsRoot.insertBefore(button, before);
   });
+  for (const button of existing.values()) button.remove();
 }
 
 function applyRemoteTabSelectionSidebarAction(): void {
   const action = remoteTabSelectionSidebarAction(isMobileRemoteShell());
-  if (action === "close-drawer") {
-    setDrawerOpen(false);
-    return;
-  }
-  setSidebarCollapsed(true);
+  if (action === "close-drawer") setDrawerOpen(false);
 }
 
 export function renderRemoteWorkspace(): void {
@@ -480,7 +495,7 @@ function renderMobileSurfaceSelector(surfaces: LayoutSurface[]): void {
     })
     .join("");
   toggle.innerHTML = `<span>${activeLabelEscaped}</span><span aria-hidden="true">▾</span>`;
-  toggle.setAttribute("aria-label", tr(`Choose surface, current surface ${activeLabel}`, `选择面板，当前为 ${activeLabel}`));
+  toggle.setAttribute("aria-label", tr(`Select panel. Current panel: ${activeLabel}`, `选择面板，当前为 ${activeLabel}`));
   toggle.onclick = () => {
     const open = selector.dataset.open === "true";
     setMobileSurfaceMenuOpen(!open);
@@ -549,14 +564,21 @@ export function updateInputUi(): void {
   const selectedSurface = tab?.surfaces.find((surface) => surface.id === selectedSurfaceId);
   const writable = connected && (Boolean(activeSurfaceIdForInput()) || selectedSurface?.kind === "ai_chat");
   const label = document.querySelector<HTMLSpanElement>("#control-state");
-  const hint = document.querySelector<HTMLSpanElement>(".toolbar-hint");
+  if (label) label.hidden = !connected || !selectedSurface || writable;
 
-  if (label) {
-    label.dataset.state = writable ? "granted" : "idle";
-    label.textContent = connected ? (writable ? tr("Input enabled", "可输入") : tr("No input target", "无可输入面板")) : tr("Input ready", "等待连接");
+  const empty = document.querySelector<HTMLElement>("#connection-empty");
+  const emptyTitle = document.querySelector<HTMLElement>("#connection-empty-title");
+  const emptyHelp = document.querySelector<HTMLElement>("#connection-empty-help");
+  if (empty) empty.hidden = Boolean(state.layoutState?.tabs.length);
+  if (emptyHelp) {
+    emptyHelp.textContent = state.activeSessionKey && currentConnectionStatus.kind === "offline"
+      ? tr("Check the session key or enable remote access in the desktop app.", "检查会话密钥，或确认桌面端已开启远程访问。")
+      : tr("Use the session key from the WispTerm desktop app.", "使用桌面端 WispTerm 的会话密钥。");
   }
-  if (hint) {
-    hint.textContent = connected ? (writable ? tr("Select panel", "选择面板") : tr("No target", "无目标")) : tr("Connect first", "请先连接");
+  if (emptyTitle) {
+    emptyTitle.textContent = currentConnectionStatus.kind === "connecting"
+      ? tr("Connecting to WispTerm", "正在连接桌面端")
+      : tr("Connect WispTerm", "连接桌面终端");
   }
 
   updateSurfaceCursors();
@@ -728,16 +750,11 @@ function mobileInputModeLabel(mode: MobileInputMode): string {
 }
 
 function mobileInputModeToggleLabel(mode: MobileInputMode): string {
-  return nextMobileInputMode(mode) === "edit"
-    ? tr("Switch to edit mode", "切换到编辑模式")
-    : tr("Switch to view mode", "切换到查看模式");
+  return tr(`Switch to ${mobileInputModeLabel(nextMobileInputMode(mode)).toLowerCase()} mode`, `切换到${mobileInputModeLabel(nextMobileInputMode(mode))}模式`);
 }
 
 function mobileVisualZoomToggleLabel(zoom: MobileVisualZoom): string {
-  return tr(
-    `Switch terminal visual zoom to ${mobileVisualZoomLabel(nextMobileVisualZoom(zoom))}`,
-    `将终端显示缩放切换为 ${mobileVisualZoomLabel(nextMobileVisualZoom(zoom))}`,
-  );
+  return tr(`Set terminal zoom to ${mobileVisualZoomLabel(nextMobileVisualZoom(zoom))}`, `将终端显示缩放切换为 ${mobileVisualZoomLabel(nextMobileVisualZoom(zoom))}`);
 }
 
 function mobileVisualZoomCompactLabel(zoom: MobileVisualZoom): string {
@@ -828,12 +845,10 @@ function setDesktopPanelMode(value: string): void {
 
 function syncDesktopPanelModeUi(mode: DesktopPanelMode): void {
   const title = document.querySelector<HTMLElement>("#desktop-panel-mode-title");
-  const badge = document.querySelector<HTMLElement>("#desktop-panel-mode-badge");
   const copy = document.querySelector<HTMLElement>("#desktop-panel-mode-copy");
   const toggle = document.querySelector<HTMLButtonElement>("#desktop-panel-mode-toggle");
 
   if (title) title.textContent = desktopPanelModeTitle(mode);
-  if (badge) badge.textContent = desktopPanelModeBadge(mode);
   if (copy) copy.textContent = desktopPanelModeCopy(mode);
   if (toggle) {
     const label = desktopPanelModeToggleLabel(mode);
@@ -845,10 +860,6 @@ function syncDesktopPanelModeUi(mode: DesktopPanelMode): void {
 
 function desktopPanelModeTitle(mode: DesktopPanelMode): string {
   return mode === "layout" ? tr("Mirror layout", "镜像布局") : tr("Focused panels", "单面板显示");
-}
-
-function desktopPanelModeBadge(mode: DesktopPanelMode): string {
-  return mode === "layout" ? tr("Layout", "布局") : tr("Focused", "单面板");
 }
 
 function desktopPanelModeCopy(mode: DesktopPanelMode): string {
@@ -999,7 +1010,7 @@ function renderWeixinPanel(): void {
     target.innerHTML = [
       `<option value="">${tr("No target", "未选择目标")}</option>`,
       ...sessions.map((session) => {
-        const connected = session.connected ? tr("connected", "已连接") : tr("offline", "离线");
+        const connected = session.connected ? tr("Online", "已连接") : tr("offline", "离线");
         return `<option value="${escapeText(session.key)}"${session.key === selected ? " selected" : ""}>${escapeText(maskSessionKey(session.key))} (${connected})</option>`;
       }),
     ].join("");
@@ -1125,6 +1136,7 @@ function setDrawerOpen(open: boolean): void {
   state.drawerOpen = open;
   const shell = document.querySelector<HTMLElement>(".console-shell");
   if (shell) shell.dataset.drawerOpen = String(open);
+  document.querySelector("#drawer-open")?.setAttribute("aria-expanded", String(open));
 }
 
 function setSidebarCollapsed(collapsed: boolean): void {
