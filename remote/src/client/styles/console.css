@@ -916,8 +916,8 @@
   position: absolute;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
-  min-width: 0;
-  min-height: 0;
+  min-width: 160px;
+  min-height: 120px;
   padding: 6px;
 }
 
@@ -941,9 +941,10 @@
   min-height: 0;
   padding: 8px;
   border-radius: var(--radius);
-  background: var(--terminal-bg);
+  background: var(--terminal-frame-bg);
   overflow: hidden;
 }
+
 
 .terminal-host,
 .terminal-host .xterm {
@@ -975,9 +976,11 @@
   scrollbar-width: none;
 }
 
-.terminal-host .xterm-scrollable-element,
 .terminal-host .xterm-screen {
   background-color: var(--terminal-bg) !important;
+  outline: 1px solid var(--terminal-frame-border);
+  outline-offset: 0;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04);
 }
 
 .terminal-host .xterm-viewport::-webkit-scrollbar {

@@ -22,7 +22,6 @@ import {
   type CanvasPoint,
   type CanvasSize,
 } from "./mobile_canvas";
-import { desktopTerminalFontSize } from "./terminal_font_fit";
 import { shouldFocusTerminalElement } from "./focus_policy";
 import { parseAiChatTranscript, type AiChatMessage } from "./ai_chat_transcript";
 import { aiChatStopControlState } from "./ai_chat_controls";
@@ -32,7 +31,7 @@ import { setNativeTerminalInputBlocked, shouldBlockNativeTerminalInput } from ".
 import { cursorMoveSequence, emptyState, validPositiveInteger } from "./utils";
 import { currentTab, resetSurfaceViews, state } from "./state";
 import { getTerminalPalette, subscribeToTheme } from "./theme";
-import { REMOTE_TERMINAL_FONT_SIZE, REMOTE_TERMINAL_SCROLLBACK } from "./terminal_options";
+import { REMOTE_TERMINAL_SCROLLBACK } from "./terminal_options";
 import {
   shouldBufferLiveOutputForInitialSnapshot,
   shouldFlushBufferedOutput,
@@ -50,10 +49,6 @@ const DESKTOP_SCROLLBAR_MIN_THUMB_HEIGHT = 32;
 const DESKTOP_SCROLLBAR_VERTICAL_INSET = 10;
 
 type InputHandler = (surfaceId: string, data: string) => void;
-let fitQueued = false;
-let measuredDpr = 0;
-const desktopCellSizes = new Map<number, CanvasSize>();
-
 let inputHandler: InputHandler = () => {
   // no-op until transport registers
 };
@@ -112,7 +107,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     convertEol: true,
     disableStdin: false,
     fontFamily: '"JetBrains Mono", "Cascadia Mono", monospace',
-    fontSize: REMOTE_TERMINAL_FONT_SIZE,
+    fontSize: 13,
     scrollback: REMOTE_TERMINAL_SCROLLBACK,
     theme: getTerminalPalette(),
   });
@@ -144,6 +139,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     disposeMiddleClickGesture: null,
     disposeCanvasPan: null,
     resizeObserver: null,
+    fitQueued: false,
     canvasPan: { x: 0, y: 0 },
     lastCanvasViewport: null,
     needsDefaultCanvasPan: false,
@@ -235,12 +231,13 @@ export function renderRemotePanels(): void {
       view.opened = true;
       applySurfaceVisualZoom(view);
       syncTerminalNativeInputGuard(view);
-      view.resizeObserver = new ResizeObserver(refitAllSurfaces);
+      view.resizeObserver = new ResizeObserver(() => scheduleFit(view));
       view.resizeObserver.observe(view.host);
     }
     updateSurfaceCursor(view, surface.id);
     applyInitialSnapshot(view, surface);
     flushPendingOutput(view);
+    scheduleFit(view);
 
     if (
       surface.id === state.selectedSurfaceId &&
@@ -257,7 +254,6 @@ export function renderRemotePanels(): void {
       view.panel.remove();
     }
   }
-  refitAllSurfaces();
 }
 
 export function focusAndFitSelectedSurface(): void {
@@ -270,7 +266,7 @@ export function focusAndFitSelectedSurface(): void {
     return;
   }
   if (shouldFocusTerminalElement()) view.term.focus();
-  refitAllSurfaces();
+  scheduleFit(view);
 }
 
 export function reconcileSurfaceViews(): void {
@@ -317,26 +313,7 @@ export function writeLegacyOutput(data: string): void {
 }
 
 export function refitAllSurfaces(): void {
-  if (fitQueued) return;
-  fitQueued = true;
-  requestAnimationFrame(() => {
-    fitQueued = false;
-    const visible = [...state.surfaceViews.values()].filter(
-      (view) => view.opened && view.host.isConnected && view.host.clientWidth > 0 && view.host.clientHeight > 0,
-    );
-    const mobile = isMobileRemoteShell();
-    const fontSize = mobile ? REMOTE_TERMINAL_FONT_SIZE : fitDesktopFont(visible);
-    for (const view of visible) {
-      try {
-        if (view.term.options.fontSize !== fontSize) view.term.options.fontSize = fontSize;
-        fitOrResize(view);
-        updateCanvasPan(view);
-        view.term.refresh(0, Math.max(0, view.term.rows - 1));
-      } catch {
-        // xterm can briefly report zero-sized panels while layout is settling.
-      }
-    }
-  });
+  for (const view of state.surfaceViews.values()) scheduleFit(view);
 }
 
 export function updateSurfaceCursors(): void {
@@ -360,8 +337,8 @@ export function syncSurfaceVisualZooms(): void {
     applySurfaceVisualZoom(view);
     view.needsDefaultCanvasPan = true;
     view.lastCanvasViewport = null;
+    scheduleFit(view);
   }
-  refitAllSurfaces();
 }
 
 function focusSurfaceView(surfaceId: string): void {
@@ -561,35 +538,19 @@ function fitOrResize(view: SurfaceView): void {
   view.fit.fit();
 }
 
-function fitDesktopFont(views: SurfaceView[]): number {
-  const viewports = views.flatMap((view) => {
-    if (view.remoteCols === null || view.remoteRows === null) return [];
-    return [{ ...canvasViewportSize(view), cols: view.remoteCols, rows: view.remoteRows }];
-  });
-  const probe = views.find((view) => view.remoteCols !== null && view.remoteRows !== null);
-  const screen = probe?.term.element?.querySelector<HTMLElement>(".xterm-screen");
-  if (!probe || !screen) return REMOTE_TERMINAL_FONT_SIZE;
-
-  if (measuredDpr !== window.devicePixelRatio) {
-    desktopCellSizes.clear();
-    measuredDpr = window.devicePixelRatio;
-  }
-
-  // Every browser pane uses the same font and renderer. Measure one xterm and
-  // reuse its cell dimensions until browser zoom or monitor DPI changes.
-  return desktopTerminalFontSize(viewports, (fontSize) => {
-    const cached = desktopCellSizes.get(fontSize);
-    if (cached) return cached;
-    if (probe.term.options.fontSize !== fontSize) probe.term.options.fontSize = fontSize;
-    const size = {
-      width: Number.parseFloat(screen.style.width) / probe.term.cols,
-      height: Number.parseFloat(screen.style.height) / probe.term.rows,
-    };
-    if (!Number.isFinite(size.width) || !Number.isFinite(size.height) || size.width <= 0 || size.height <= 0) {
-      return undefined;
+function scheduleFit(view: SurfaceView): void {
+  if (view.fitQueued) return;
+  view.fitQueued = true;
+  requestAnimationFrame(() => {
+    view.fitQueued = false;
+    if (!view.host.isConnected) return;
+    try {
+      fitOrResize(view);
+      updateCanvasPan(view);
+      view.term.refresh(0, Math.max(0, view.term.rows - 1));
+    } catch {
+      // xterm can briefly report zero-sized panels while layout is settling.
     }
-    desktopCellSizes.set(fontSize, size);
-    return size;
   });
 }
 
