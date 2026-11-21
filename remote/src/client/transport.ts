@@ -49,9 +49,8 @@ export function setTransportHooks(next: TransportHooks): void {
 }
 
 const RELAY_NOTICE_LABELS = new Map([
-  ["Browser paired; input enabled", tr("Browser paired; input enabled", "浏览器已配对，可以发送输入")],
-  ["WispTerm connected", tr("WispTerm connected", "WispTerm 已连接")],
-  ["WispTerm disconnected", tr("WispTerm disconnected", "WispTerm 已断开")],
+  ["WispTerm connected", tr("Desktop connected", "桌面端已连接")],
+  ["WispTerm disconnected", tr("Desktop disconnected", "桌面端已断开")],
 ]);
 
 const encoder = new TextEncoder();
@@ -84,13 +83,13 @@ export async function loadMe(): Promise<MeResponse> {
 
 export function connect(sessionKey: string): void {
   if (!sessionKey) return;
+  if (state.activeSessionKey !== sessionKey) state.notices = [];
   state.activeSessionKey = sessionKey;
   cancelReconnect();
   state.socket?.close();
   disposeSurfaceViews();
   state.layoutState = null;
   state.selectedSurfaceId = null;
-  state.notices = [];
   state.hasSeenLayout = false;
   resetConnectionHealth();
   saveSessionKey(sessionKey);
@@ -104,11 +103,13 @@ export function connect(sessionKey: string): void {
   hooks.setStatus(connectionStatusConnecting(tr("Connecting...", "正在连接…")));
   hooks.onInputUiChanged();
 
+  let relayConnected = false;
   ws.addEventListener("open", () => {
     if (state.socket !== ws) return;
+    relayConnected = true;
     reconnectAttempts = 0;
     updateConnectionStatus();
-    pushNotice(tr("Connected. Waiting for WispTerm layout...", "已接入中继，正在等待 WispTerm 标签页…"));
+    pushNotice(tr("Relay connected", "中继已连接"));
     hooks.onNoticesChanged();
     hooks.onInputUiChanged();
     startHeartbeat(ws);
@@ -121,6 +122,10 @@ export function connect(sessionKey: string): void {
     state.socket = null;
     resetConnectionHealth();
     if (state.activeSessionKey === sessionKey) {
+      pushNotice(relayConnected
+        ? tr("Relay disconnected", "中继连接已断开")
+        : tr("Could not connect to the relay", "未能连接中继"));
+      hooks.onNoticesChanged();
       scheduleReconnect();
     } else {
       hooks.setStatus(connectionStatusOffline());
@@ -185,6 +190,8 @@ export function connect(sessionKey: string): void {
       const bytes = decodeHex(message.data);
       if (surfaceId && bytes) writeSurfaceBytes(surfaceId, bytes);
     } else if (message.type === "notice" && typeof message.message === "string") {
+      // Older relays announce a browser attachment even when the desktop is offline.
+      if (message.message === "Browser paired; input enabled") return;
       pushNotice(RELAY_NOTICE_LABELS.get(message.message) ?? message.message);
       hooks.onNoticesChanged();
     }

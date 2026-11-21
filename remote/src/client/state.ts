@@ -43,6 +43,7 @@ export function activeSurfaceIdForInput(): string | null {
 }
 
 export function pushNotice(message: string): void {
+  if (state.notices.at(-1) === message) return;
   state.notices = [...state.notices.slice(-5), message];
 }
 
