@@ -2,7 +2,7 @@ import { getLocale, isRemoteLocale, setLocale, tr } from "../i18n";
 import type { ConnectionStatus, LayoutSurface, MobileInputMode, MobileVisualZoom } from "../types";
 import { iconClose, iconMenu, themeToggleMarkup } from "../icons";
 import { bindThemeToggleButtons } from "../theme";
-import { activeSurfaceIdForInput, currentTab, state, pushNotice } from "../state";
+import { activeSurfaceIdForInput, currentTab, state } from "../state";
 import {
   clearSessionKey,
   maskSessionKey,
@@ -111,9 +111,18 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
                 <button type="button" class="secondary-button" id="clear-session-button" ${hasSavedSessionKey ? "" : "hidden"}>${tr("Forget key", "断开并忘记")}</button>
               </div>
             </form>
-            <details class="settings-group connection-log">
-              <summary>${tr("Connection log", "连接记录")}</summary>
-              <ul id="notice-log" class="notice-log" aria-label="${tr("Connection log, newest first", "连接记录，最新在前")}"></ul>
+            <details class="settings-group connection-health">
+              <summary>${tr("Connection status", "运行状态")}</summary>
+              <dl class="connection-health-rows" aria-live="polite">
+                <div>
+                  <dt>${tr("Relay", "中继")}</dt>
+                  <dd id="relay-status"></dd>
+                </div>
+                <div>
+                  <dt>${tr("Desktop", "桌面端")}</dt>
+                  <dd id="desktop-status"></dd>
+                </div>
+              </dl>
             </details>
           </div>
 
@@ -284,8 +293,6 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
     renderRemoteWorkspace();
     clearSessionButton.hidden = true;
     sessionInput?.focus();
-    pushNotice(tr("Saved session key cleared.", "已清除保存的会话密钥。"));
-    renderNotices();
   });
 
   document.querySelector<HTMLButtonElement>("#open-connection")?.addEventListener("click", () => {
@@ -310,9 +317,9 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
     document.querySelector<HTMLInputElement>("#remote-language input:checked")?.focus();
   }
   bindDesktopPanelMode();
-  renderNotices();
   bindWeixinPanel();
   bindStatusLatencyDisclosure();
+  setStatus(currentConnectionStatus);
   updateMobileSurfaceMode();
   syncMobileInputModeUi();
   syncMobileVisualZoomUi();
@@ -349,17 +356,26 @@ export function setStatus(status: ConnectionStatus): void {
     pip.title = accessibilityText;
     pip.setAttribute("aria-label", accessibilityText);
   }
+  renderConnectionLink("#relay-status", status.relay);
+  renderConnectionLink("#desktop-status", status.desktop);
+  renderConnectionEmpty();
   syncVisibleStatusLatencyDisclosure();
 }
 
-export function renderNotices(): void {
-  const root = document.querySelector<HTMLUListElement>("#notice-log");
-  if (!root) return;
-
-  const notices = state.notices.length
-    ? state.notices.slice().reverse()
-    : [tr("No connection activity", "暂无连接记录")];
-  root.innerHTML = notices.map((notice) => `<li>${escapeText(notice)}</li>`).join("");
+function renderConnectionLink(
+  selector: string,
+  state: ConnectionStatus["relay"] | ConnectionStatus["desktop"],
+): void {
+  const element = document.querySelector<HTMLElement>(selector);
+  if (!element || element.dataset.state === state) return;
+  const labels = {
+    online: tr("Connected", "已连接"),
+    offline: tr("Not connected", "未连接"),
+    connecting: tr("Connecting", "连接中"),
+    unknown: tr("Unknown", "未确认"),
+  };
+  element.dataset.state = state;
+  element.textContent = labels[state];
 }
 
 export function renderRemoteTabs(): void {
@@ -567,23 +583,41 @@ export function updateInputUi(): void {
   const label = document.querySelector<HTMLSpanElement>("#control-state");
   if (label) label.hidden = !connected || !selectedSurface || writable;
 
-  const empty = document.querySelector<HTMLElement>("#connection-empty");
-  const emptyTitle = document.querySelector<HTMLElement>("#connection-empty-title");
-  const emptyHelp = document.querySelector<HTMLElement>("#connection-empty-help");
-  if (empty) empty.hidden = Boolean(state.layoutState?.tabs.length);
-  if (emptyHelp) {
-    emptyHelp.textContent = state.activeSessionKey && currentConnectionStatus.kind === "offline"
-      ? tr("Check the session key or enable remote access in the desktop app.", "检查会话密钥，或确认桌面端已开启远程访问。")
-      : tr("Use the session key from the WispTerm desktop app.", "使用桌面端 WispTerm 的会话密钥。");
-  }
-  if (emptyTitle) {
-    emptyTitle.textContent = currentConnectionStatus.kind === "connecting"
-      ? tr("Connecting to WispTerm", "正在连接桌面端")
-      : tr("Connect WispTerm", "连接桌面终端");
-  }
-
+  renderConnectionEmpty();
   updateSurfaceCursors();
   updateAiChatControls();
+}
+
+function renderConnectionEmpty(): void {
+  const empty = document.querySelector<HTMLElement>("#connection-empty");
+  if (!empty) return;
+  empty.hidden = Boolean(state.layoutState?.tabs.length);
+  if (empty.hidden) return;
+
+  const desktopConnected = currentConnectionStatus.desktop === "online";
+  const title = empty.querySelector<HTMLElement>("#connection-empty-title");
+  const help = empty.querySelector<HTMLElement>("#connection-empty-help");
+  const openConnection = empty.querySelector<HTMLButtonElement>("#open-connection");
+  if (title) {
+    if (desktopConnected) {
+      title.textContent = state.hasSeenLayout
+        ? tr("No desktop tabs", "桌面端暂无标签页")
+        : tr("Waiting for desktop tabs", "正在等待桌面端标签页");
+    } else {
+      title.textContent = currentConnectionStatus.kind === "connecting"
+        ? tr("Connecting to WispTerm", "正在连接桌面端")
+        : tr("Connect WispTerm", "连接桌面终端");
+    }
+  }
+  if (help) {
+    help.hidden = desktopConnected;
+    if (!desktopConnected) {
+      help.textContent = state.activeSessionKey && currentConnectionStatus.kind === "offline"
+        ? tr("Check the session key or enable remote access in the desktop app.", "检查会话密钥，或确认桌面端已开启远程访问。")
+        : tr("Use the session key from the WispTerm desktop app.", "使用桌面端 WispTerm 的会话密钥。");
+    }
+  }
+  if (openConnection) openConnection.hidden = desktopConnected;
 }
 
 function updateMobileSurfaceMode(): void {

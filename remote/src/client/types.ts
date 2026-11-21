@@ -82,6 +82,8 @@ export type StatusKind = "offline" | "connecting" | "online" | "high-latency";
 
 export type ConnectionStatus = {
   kind: StatusKind;
+  relay: "offline" | "connecting" | "online";
+  desktop: "unknown" | "offline" | "online";
   text: string;
   latencyMs: number | null;
   detail: string;

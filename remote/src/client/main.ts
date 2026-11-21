@@ -9,7 +9,6 @@ import { setMobileTextInputSender } from "./mobile_text_input";
 import { setVirtualKeyboardSender } from "./vkbd";
 import {
   renderConsole,
-  renderNotices,
   renderRemoteWorkspace,
   setStatus,
   updateInputUi,
@@ -28,7 +27,6 @@ setMobileTextInputSender(sendInputBytes);
 setVirtualKeyboardSender(sendInputBytes);
 setTransportHooks({
   onWorkspaceChanged: renderRemoteWorkspace,
-  onNoticesChanged: renderNotices,
   onInputUiChanged: updateInputUi,
   setStatus,
 });
