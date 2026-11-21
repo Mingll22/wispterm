@@ -169,17 +169,29 @@ export function renderRemotePanels(): void {
     delete panelsRoot.dataset.mobileMode;
     delete panelsRoot.dataset.desktopMode;
     panelsRoot.replaceChildren(emptyState(tr("No panels for this tab yet.", "此标签页暂无面板")));
-    const fallback = tr("Remote workspace", "远程工作区");
-    if (titleRoot) titleRoot.textContent = fallback;
+    const fallback = tab?.title || tr("Remote terminal", "远程终端");
+    if (titleRoot) {
+      titleRoot.textContent = fallback;
+      titleRoot.title = fallback;
+    }
     const mobileTitleRoot = document.querySelector<HTMLSpanElement>("#mobile-workspace-title");
-    if (mobileTitleRoot) mobileTitleRoot.textContent = fallback;
+    if (mobileTitleRoot) {
+      mobileTitleRoot.textContent = fallback;
+      mobileTitleRoot.title = fallback;
+    }
     return;
   }
 
   const tabTitle = tab.title || tr(`Tab ${tab.index + 1}`, `标签页 ${tab.index + 1}`);
-  if (titleRoot) titleRoot.textContent = tabTitle;
+  if (titleRoot) {
+    titleRoot.textContent = tabTitle;
+    titleRoot.title = tabTitle;
+  }
   const mobileTitleRoot = document.querySelector<HTMLSpanElement>("#mobile-workspace-title");
-  if (mobileTitleRoot) mobileTitleRoot.textContent = tabTitle;
+  if (mobileTitleRoot) {
+    mobileTitleRoot.textContent = tabTitle;
+    mobileTitleRoot.title = tabTitle;
+  }
   panelsRoot.className = "panels-stage";
   panelsRoot.dataset.mobileMode = "single";
   panelsRoot.dataset.desktopMode = state.desktopPanelMode;

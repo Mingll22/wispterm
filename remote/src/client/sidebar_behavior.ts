@@ -1,5 +1,5 @@
-export type RemoteTabSelectionSidebarAction = "close-drawer" | "collapse-sidebar";
+export type RemoteTabSelectionSidebarAction = "close-drawer" | "keep-sidebar";
 
 export function remoteTabSelectionSidebarAction(isMobileRemoteShell: boolean): RemoteTabSelectionSidebarAction {
-  return isMobileRemoteShell ? "close-drawer" : "collapse-sidebar";
+  return isMobileRemoteShell ? "close-drawer" : "keep-sidebar";
 }

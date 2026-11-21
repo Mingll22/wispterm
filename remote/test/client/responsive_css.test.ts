@@ -63,12 +63,12 @@ test("mobile top bar uses compact status controls instead of large mode buttons"
   assert.match(markup, /class="mobile-chrome-controls"/);
   assert.match(markup, /mobileInputModeLabel/);
   assert.match(markup, /mobileVisualZoomCompactLabel/);
-  assert.match(markup, /id="kbd-toggle"[\s\S]*>\s*\$\{tr\("Key", "快捷键"\)\}\s*<\/button>/);
+  assert.match(markup, /id="kbd-toggle"[\s\S]*>\s*\$\{tr\("Keys", "快捷键"\)\}\s*<\/button>/);
   assert.match(barRule, /grid-template-columns:\s*40px\s+minmax\(0,\s*1fr\)\s+auto\s*;/);
   assert.doesNotMatch(barRule, /52px|58px/);
   assert.match(controlsRule, /display:\s*flex\s*;/);
   for (const rule of [modeRule, zoomRule, keyboardRule]) {
-    assert.match(rule, /height:\s*32px\s*;/);
+    assert.match(rule, /height:\s*36px\s*;/);
     assert.doesNotMatch(rule, /height:\s*42px\s*;/);
   }
 });
@@ -87,10 +87,10 @@ test("status lights expose clickable red green and yellow latency states", async
   assert.match(markup, /id="status-latency-detail"/);
   assert.match(markup, /id="mobile-status-latency"/);
   assert.match(dotRule, /background:\s*var\(--danger\)\s*;/);
-  assert.match(pipRule, /background:\s*var\(--danger\)\s*;/);
+  assert.match(pipRule, /--status-color:\s*var\(--danger\)\s*;/);
   assert.match(onlineDotRule, /background:\s*var\(--ok\)\s*;/);
   assert.match(highLatencyDotRule, /background:\s*var\(--warning\)\s*;/);
-  assert.match(highLatencyPipRule, /background:\s*var\(--warning\)\s*;/);
+  assert.match(highLatencyPipRule, /--status-color:\s*var\(--warning\)\s*;/);
 });
 
 test("mobile surface selector moves into the top bar and removes the second chrome row", async () => {

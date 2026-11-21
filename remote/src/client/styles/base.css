@@ -12,10 +12,7 @@ body,
 }
 
 body {
-  background:
-    radial-gradient(circle at top left, var(--bg-glow-1), transparent 34rem),
-    radial-gradient(circle at bottom right, var(--bg-glow-2), transparent 30rem),
-    var(--bg);
+  background: var(--bg);
   color: var(--text);
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
@@ -154,28 +151,95 @@ button:disabled {
 }
 
 .auth-shell {
-  grid-template-rows: minmax(0, 1fr) auto;
-  gap: 20px;
-  position: relative;
+  height: 100%;
+  min-height: 0;
+  align-items: safe center;
+  overflow-y: auto;
+  background: var(--bg);
+  padding: max(24px, var(--safe-top)) max(16px, var(--safe-right)) max(24px, var(--safe-bottom))
+    max(16px, var(--safe-left));
 }
 
 .auth-panel {
-  align-self: center;
-  width: min(440px, 100%);
-  padding: 32px;
+  width: min(100%, 372px);
+  padding: clamp(20px, 5vw, 28px);
+  box-shadow: none;
 }
 
-.auth-brand-footer {
-  align-self: end;
-  justify-self: center;
-  text-align: center;
+.auth-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px 16px;
+  align-items: center;
+  margin-bottom: 20px;
 }
 
-.auth-shell .theme-toggle-floating {
-  position: absolute;
-  top: max(20px, var(--safe-top));
-  right: max(20px, var(--safe-right));
-  z-index: 5;
+.auth-brand {
+  color: var(--text);
+  font-size: 13px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.auth-header h1 {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 24px;
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: 0;
+}
+
+.auth-form {
+  display: grid;
+  gap: 14px;
+}
+
+.auth-form label {
+  margin: 0;
+  gap: 6px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.auth-form input {
+  min-height: 44px;
+  padding: 9px 12px;
+  font-size: 16px;
+  font-weight: 400;
+}
+
+.auth-form input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.auth-action {
+  display: grid;
+  gap: 6px;
+}
+
+.auth-form button[type="submit"] {
+  min-height: 44px;
+  padding-block: 8px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.auth-form button[type="submit"]:disabled {
+  cursor: wait;
+  opacity: .72;
+}
+
+.auth-panel button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.auth-form .form-message {
+  min-height: 20px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
 }
 
 .icon-button {
