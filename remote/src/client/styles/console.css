@@ -194,7 +194,7 @@
 
 .sidebar-footer-actions {
   display: grid;
-  grid-template-columns: 42px 42px minmax(0, 1fr);
+  grid-template-columns: 42px minmax(0, 1fr);
   gap: 10px;
   align-items: center;
 }
@@ -368,17 +368,12 @@
   background: var(--ghost-bg);
 }
 
-.dashboard-log {
-  display: grid;
-  gap: 8px;
-}
-
 .settings-section {
   padding-bottom: 4px;
 }
 
 
-.language-options {
+.setting-options {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 6px;
@@ -388,21 +383,21 @@
   border: 0;
 }
 
-.language-options legend {
+.setting-options legend {
   margin-bottom: 8px;
   color: var(--text);
   font-size: 13px;
   font-weight: 700;
 }
 
-.sidebar .language-options label {
+.sidebar .setting-options label {
   position: relative;
   min-width: 0;
   margin: 0;
   cursor: pointer;
 }
 
-.sidebar .language-options input {
+.sidebar .setting-options input {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -411,7 +406,7 @@
   opacity: 0;
 }
 
-.language-options span {
+.setting-options span {
   display: grid;
   min-height: 38px;
   place-items: center;
@@ -423,12 +418,12 @@
   white-space: nowrap;
 }
 
-.language-options input:checked + span {
+.setting-options input:checked + span {
   border-color: var(--selected-ring);
   background: var(--accent-soft);
 }
 
-.language-options input:focus-visible + span {
+.setting-options input:focus-visible + span {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -443,32 +438,6 @@
 .settings-version {
   color: var(--muted);
   font-size: 12px;
-}
-
-.panel-mode-panel {
-  display: grid;
-  gap: 8px;
-}
-
-.settings-item-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.settings-item-head strong {
-  color: var(--text);
-  font-size: 13px;
-  line-height: 1.2;
-}
-
-.panel-mode-panel p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1.35;
 }
 
 .settings-group {
@@ -666,8 +635,7 @@
   gap: 4px;
 }
 
-.remote-tabs.empty,
-.notice-log {
+.remote-tabs.empty {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
@@ -714,11 +682,41 @@
   font-variant-numeric: tabular-nums;
 }
 
+.connection-log {
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.connection-log summary {
+  padding-inline: 10px;
+  font-weight: 600;
+}
+
+.connection-log[open] summary {
+  border-bottom: 1px solid var(--line);
+}
+
 .notice-log {
-  display: grid;
-  gap: 6px;
-  max-height: 140px;
-  overflow: auto;
+  max-block-size: 9.5rem;
+  margin: 0;
+  padding: 0 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.notice-log li {
+  padding-block: 8px;
+}
+
+.notice-log li + li {
+  border-top: 1px solid var(--line);
 }
 
 .status-dot {

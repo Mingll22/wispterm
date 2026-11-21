@@ -121,13 +121,8 @@
     padding: 12px max(14px, var(--safe-right)) max(14px, var(--safe-bottom)) max(14px, var(--safe-left));
   }
 
-  #desktop-panel-mode,
-  #desktop-panel-mode-toggle {
+  #desktop-panel-mode {
     display: none;
-  }
-
-  .sidebar-footer-actions {
-    grid-template-columns: 42px minmax(0, 1fr);
   }
 
   .remote-tabs-panel {
@@ -155,12 +150,6 @@
   .tab-chip-count {
     min-width: 26px;
     height: 26px;
-  }
-
-  .notice-log {
-    max-height: 150px;
-    overflow-y: auto;
-    overflow-x: hidden;
   }
 
   .weixin-qr img {

@@ -1,6 +1,6 @@
 import { getLocale, isRemoteLocale, setLocale, tr } from "../i18n";
-import type { ConnectionStatus, DesktopPanelMode, LayoutSurface, MobileInputMode, MobileVisualZoom } from "../types";
-import { iconClose, iconMenu, iconPanelMode, themeToggleMarkup } from "../icons";
+import type { ConnectionStatus, LayoutSurface, MobileInputMode, MobileVisualZoom } from "../types";
+import { iconClose, iconMenu, themeToggleMarkup } from "../icons";
 import { bindThemeToggleButtons } from "../theme";
 import { activeSurfaceIdForInput, currentTab, state, pushNotice } from "../state";
 import {
@@ -111,16 +111,16 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
                 <button type="button" class="secondary-button" id="clear-session-button" ${hasSavedSessionKey ? "" : "hidden"}>${tr("Forget key", "断开并忘记")}</button>
               </div>
             </form>
-            <details class="settings-group">
+            <details class="settings-group connection-log">
               <summary>${tr("Connection log", "连接记录")}</summary>
-              <div id="notice-log" class="notice-log">${tr("No connection activity", "暂无连接记录")}</div>
+              <ul id="notice-log" class="notice-log" aria-label="${tr("Connection log, newest first", "连接记录，最新在前")}"></ul>
             </details>
           </div>
 
           <div class="sidebar-page settings-page${sidebarPage === "settings" ? " active" : ""}" data-sidebar-page="settings">
           <div class="sidebar-section settings-section">
             <div class="panel language-panel">
-              <fieldset id="remote-language" class="language-options" aria-describedby="language-error">
+              <fieldset id="remote-language" class="setting-options" aria-describedby="language-error">
                 <legend>${tr("Language", "语言")}</legend>
                 <label>
                   <input type="radio" name="remote-language" value="en"${getLocale() === "en" ? " checked" : ""} />
@@ -133,14 +133,18 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
               </fieldset>
               <output class="language-error" id="language-error" aria-live="polite"></output>
             </div>
-            <div class="panel panel-mode-panel" id="desktop-panel-mode">
-              <div class="settings-item-head">
-                <div>
-                  <div class="panel-label">${tr("Desktop display", "桌面端显示")}</div>
-                  <strong id="desktop-panel-mode-title">${desktopPanelModeTitle(state.desktopPanelMode)}</strong>
-                </div>
-              </div>
-              <p id="desktop-panel-mode-copy">${desktopPanelModeCopy(state.desktopPanelMode)}</p>
+            <div class="panel" id="desktop-panel-mode">
+              <fieldset class="setting-options">
+                <legend>${tr("Desktop layout", "桌面布局")}</legend>
+                <label>
+                  <input type="radio" name="desktop-layout" value="layout"${state.desktopPanelMode === "layout" ? " checked" : ""} />
+                  <span>${tr("Mirror layout", "镜像布局")}</span>
+                </label>
+                <label>
+                  <input type="radio" name="desktop-layout" value="single"${state.desktopPanelMode === "single" ? " checked" : ""} />
+                  <span>${tr("Single panel", "单面板")}</span>
+                </label>
+              </fieldset>
             </div>
             <details class="settings-group">
               <summary>${tr("Weixin Direct", "微信直连")}</summary>
@@ -176,9 +180,6 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
 
         <div class="sidebar-footer">
           <div class="sidebar-footer-actions">
-            <button type="button" class="icon-button panel-mode-toggle" id="desktop-panel-mode-toggle" aria-label="${desktopPanelModeToggleLabel(state.desktopPanelMode)}" title="${desktopPanelModeToggleLabel(state.desktopPanelMode)}">
-              ${iconPanelMode(state.desktopPanelMode)}
-            </button>
             ${themeToggleMarkup("sidebar-footer-theme")}
             <button class="ghost-button" id="logout-button">${tr("Sign out", "退出登录")}</button>
           </div>
@@ -309,6 +310,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
     document.querySelector<HTMLInputElement>("#remote-language input:checked")?.focus();
   }
   bindDesktopPanelMode();
+  renderNotices();
   bindWeixinPanel();
   bindStatusLatencyDisclosure();
   updateMobileSurfaceMode();
@@ -351,13 +353,13 @@ export function setStatus(status: ConnectionStatus): void {
 }
 
 export function renderNotices(): void {
-  const root = document.querySelector<HTMLDivElement>("#notice-log");
+  const root = document.querySelector<HTMLUListElement>("#notice-log");
   if (!root) return;
-  if (state.notices.length === 0) {
-    root.textContent = tr("No connection activity", "暂无连接记录");
-    return;
-  }
-  root.innerHTML = state.notices.map((notice) => `<div>${escapeText(notice)}</div>`).join("");
+
+  const notices = state.notices.length
+    ? state.notices.slice().reverse()
+    : [tr("No connection activity", "暂无连接记录")];
+  root.innerHTML = notices.map((notice) => `<li>${escapeText(notice)}</li>`).join("");
 }
 
 export function renderRemoteTabs(): void {
@@ -426,7 +428,6 @@ export function renderRemoteWorkspace(): void {
   renderRemoteTabs();
   renderRemotePanels();
   renderSurfaceStrip();
-  renderNotices();
   updateMobileSurfaceMode();
   updateInputUi();
 }
@@ -825,50 +826,20 @@ function setSidebarPage(page: SidebarPage): void {
 }
 
 function bindDesktopPanelMode(): void {
-  document.querySelector<HTMLButtonElement>("#desktop-panel-mode-toggle")?.addEventListener("click", () => {
-    setDesktopPanelMode(state.desktopPanelMode === "layout" ? "single" : "layout");
+  document.querySelector("#desktop-panel-mode")?.addEventListener("change", (event) => {
+    if (event.target instanceof HTMLInputElement) setDesktopPanelMode(event.target.value);
   });
 }
 
 function setDesktopPanelMode(value: string): void {
   if (value !== "layout" && value !== "single") return;
-  const mode: DesktopPanelMode = value;
-  if (state.desktopPanelMode === mode) return;
-  state.desktopPanelMode = mode;
-  saveDesktopPanelMode(mode);
+  if (state.desktopPanelMode === value) return;
+  state.desktopPanelMode = value;
+  saveDesktopPanelMode(value);
   const shell = document.querySelector<HTMLElement>(".console-shell");
-  if (shell) shell.dataset.desktopPanelMode = mode;
-  syncDesktopPanelModeUi(mode);
+  if (shell) shell.dataset.desktopPanelMode = value;
   renderRemoteWorkspace();
   refitAllSurfaces();
-}
-
-function syncDesktopPanelModeUi(mode: DesktopPanelMode): void {
-  const title = document.querySelector<HTMLElement>("#desktop-panel-mode-title");
-  const copy = document.querySelector<HTMLElement>("#desktop-panel-mode-copy");
-  const toggle = document.querySelector<HTMLButtonElement>("#desktop-panel-mode-toggle");
-
-  if (title) title.textContent = desktopPanelModeTitle(mode);
-  if (copy) copy.textContent = desktopPanelModeCopy(mode);
-  if (toggle) {
-    const label = desktopPanelModeToggleLabel(mode);
-    toggle.innerHTML = iconPanelMode(mode);
-    toggle.setAttribute("aria-label", label);
-    toggle.title = label;
-  }
-}
-
-function desktopPanelModeTitle(mode: DesktopPanelMode): string {
-  return mode === "layout" ? tr("Mirror layout", "镜像布局") : tr("Focused panels", "单面板显示");
-}
-
-function desktopPanelModeCopy(mode: DesktopPanelMode): string {
-  if (mode === "layout") return tr("Local split layout.", "按桌面端的分屏布局显示。");
-  return tr("One panel at a time.", "每次显示一个面板。");
-}
-
-function desktopPanelModeToggleLabel(mode: DesktopPanelMode): string {
-  return mode === "layout" ? tr("Switch desktop tabs to focused panels", "切换到单面板显示") : tr("Switch desktop tabs to mirror layout", "切换到镜像布局");
 }
 
 function bindViewportRefit(): void {
