@@ -77,7 +77,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
     <section class="console-shell" data-kbd-visible="${state.kbdVisible}" data-mobile-surface-kind="none" data-mobile-vkbd-visible="false" data-mobile-input-mode="${state.mobileInputMode}" data-drawer-open="${state.drawerOpen}" data-sidebar-collapsed="${state.sidebarCollapsed}" data-desktop-panel-mode="${state.desktopPanelMode}" data-sidebar-page="${sidebarPage}">
       <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
       <aside class="sidebar glass-surface" id="sidebar">
-        <div class="sidebar-main">
+        <div class="sidebar-navigation">
           <div class="sidebar-head">
             <span class="sidebar-wordmark">WispTerm</span>
             <div class="sidebar-head-actions">
@@ -93,7 +93,9 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
             <button type="button" class="sidebar-page-button${sidebarPage === "dashboard" ? " active" : ""}" data-sidebar-page-target="dashboard">${tr("Connect", "连接")}</button>
             <button type="button" class="sidebar-page-button${sidebarPage === "settings" ? " active" : ""}" data-sidebar-page-target="settings">${tr("Settings", "设置")}</button>
           </nav>
+        </div>
 
+        <div class="sidebar-main">
           <div class="sidebar-page${sidebarPage === "tabs" ? " active" : ""}" data-sidebar-page="tabs">
             <div id="remote-tabs" class="remote-tabs empty">${tr("Connect WispTerm to see its tabs", "连接桌面端后显示标签页")}</div>
           </div>

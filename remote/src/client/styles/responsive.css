@@ -45,6 +45,11 @@
     padding: 12px 13px;
   }
 
+  .sidebar-navigation {
+    gap: 12px;
+    padding: 12px 13px 0;
+  }
+
   .console-shell[data-drawer-open="true"] .sidebar {
     transform: translateX(0);
     visibility: visible;
