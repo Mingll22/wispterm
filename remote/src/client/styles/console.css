@@ -618,7 +618,7 @@
   height: 24px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: rgba(143, 160, 181, 0.22);
+  background: var(--switch-track-bg);
   transition: background-color 160ms ease, border-color 160ms ease;
 }
 
