@@ -250,6 +250,107 @@ pub fn hitTestDivider(x: i32, y: i32) ?DividerHit {
     return null;
 }
 
+const PixelRect = struct { x: i32, y: i32, w: i32, h: i32 };
+
+fn panePixelRect(slot: SplitTree.Spatial.Slot, content: PixelRect) PixelRect {
+    // Convert normalized coords to pixels
+    const x_f: f32 = @as(f32, @floatCast(slot.x)) * @as(f32, @floatFromInt(@max(content.w, 1)));
+    const y_f: f32 = @as(f32, @floatCast(slot.y)) * @as(f32, @floatFromInt(@max(content.h, 1)));
+    const w_f: f32 = @as(f32, @floatCast(slot.width)) * @as(f32, @floatFromInt(@max(content.w, 1)));
+    const h_f: f32 = @as(f32, @floatCast(slot.height)) * @as(f32, @floatFromInt(@max(content.h, 1)));
+
+    // Apply divider insets (half-divider on each side adjacent to other splits)
+    var px: i32 = content.x + @as(i32, @intFromFloat(x_f));
+    var py: i32 = content.y + @as(i32, @intFromFloat(y_f));
+    var pw: i32 = @as(i32, @intFromFloat(w_f));
+    var ph: i32 = @as(i32, @intFromFloat(h_f));
+
+    // Inset for dividers (only if not at edge)
+    const half_div = @divTrunc(SPLIT_DIVIDER_WIDTH, 2);
+    const at_left_edge = slot.x < 0.001;
+    const at_right_edge = slot.x + slot.width >= 0.999;
+    if (slot.x > 0.001) {
+        px += half_div;
+        pw -= half_div;
+    }
+    if (slot.x + slot.width < 0.999) {
+        pw -= half_div;
+    }
+    if (slot.y > 0.001) {
+        py += half_div;
+        ph -= half_div;
+    }
+    if (slot.y + slot.height < 0.999) {
+        ph -= half_div;
+    }
+
+    // Extend splits at left edge to window edge (consistent left margin)
+    if (at_left_edge) {
+        px -= @intCast(DEFAULT_PADDING);
+        pw += @intCast(DEFAULT_PADDING);
+    }
+
+    // Extend splits at right edge to window edge (so scrollbar hugs window edge)
+    if (at_right_edge) {
+        pw += @intCast(DEFAULT_PADDING);
+    }
+    pw = @max(pw, 1);
+    ph = @max(ph, 1);
+
+    return .{ .x = px, .y = py, .w = pw, .h = ph };
+}
+
+fn desktopLayout(rect: PixelRect, content: PixelRect, slot: SplitTree.Spatial.Slot) Surface.DesktopLayout {
+    return .{
+        .width = @intCast(rect.w),
+        .height = @intCast(rect.h),
+        .cell_width = font.cell_width,
+        .cell_height = font.cell_height,
+        .padding = .{
+            .top = DEFAULT_PADDING,
+            .bottom = DEFAULT_PADDING,
+            .left = DEFAULT_PADDING,
+            .right = @intFromFloat(overlays.SCROLLBAR_WIDTH + DEFAULT_PADDING),
+        },
+        .split = .{ slot.x, slot.y, slot.width, slot.height },
+        .content_size = .{ content.w, content.h },
+    };
+}
+
+/// A native window resize affects every direct terminal in the window,
+/// including tabs not currently rendered. Use the same geometry as painting.
+pub fn updateRemoteWindowGeometry(width: i32, height: i32) void {
+    const allocator = AppWindow.g_allocator orelse return;
+    const area = splitContentRect(width, height, AppWindow.currentTitlebarHeight(), AppWindow.leftPanelsWidth(), AppWindow.rightPanelsWidthForWindow(width));
+    const content: PixelRect = .{ .x = @intFromFloat(area.x), .y = @intFromFloat(area.y), .w = @intFromFloat(area.w), .h = @intFromFloat(area.h) };
+    const active_tab = AppWindow.activeTab();
+    for (tab.g_tabs[0..tab.g_tab_count]) |maybe_tab| {
+        const tab_state = maybe_tab orelse continue;
+        if (tab_state.tree.isEmpty()) continue;
+        var spatial = tab_state.tree.spatial(allocator) catch continue;
+        defer spatial.deinit(allocator);
+        var it = tab_state.tree.surfaces();
+        while (it.next()) |entry| {
+            if (!entry.surface.supportsRemoteControl()) continue;
+            if (tab_state == active_tab and !entry.surface.remoteControlActive()) continue;
+            const slot = spatial.slots[entry.handle.idx()];
+            _ = entry.surface.setScreenSizeWithPolicy(desktopLayout(panePixelRect(slot, content), content, slot), .coalesced);
+        }
+    }
+}
+
+/// Claim each affected PTY at the desktop input event, before the next paint
+/// computes its new natural grid. Other split subtrees keep their leases.
+pub fn reclaimSplitControls(tree: *const SplitTree, handle: SplitTree.Node.Handle) void {
+    switch (tree.nodes[handle.idx()]) {
+        .leaf => |pane| if (pane.surface()) |surface| surface.reclaimRemoteControl(),
+        .split => |split| {
+            reclaimSplitControls(tree, split.left);
+            reclaimSplitControls(tree, split.right);
+        },
+    }
+}
+
 /// Compute split layout for a tab, returning pixel rects for each surface.
 /// Each surface is resized to fit its allocated area with proper padding.
 /// Returns the number of surfaces (0 if tree is empty).
@@ -270,8 +371,7 @@ pub fn computeSplitLayout(
     // every loop iteration until a terminal tab was shown (issue #675).
     const immediate_resize = AppWindow.consumeImmediateLayoutResize();
     if (active_tab.tree.isEmpty()) return 0;
-    const safe_content_w = @max(content_w, 1);
-    const safe_content_h = @max(content_h, 1);
+    const content: PixelRect = .{ .x = content_x, .y = content_y, .w = content_w, .h = content_h };
 
     // Get spatial representation (normalized 0-1 coordinates)
     const allocator = AppWindow.g_allocator orelse return 0;
@@ -293,76 +393,16 @@ pub fn computeSplitLayout(
 
         const slot = spatial.slots[entry.handle.idx()];
 
-        // Convert normalized coords to pixels
-        const x_f: f32 = @as(f32, @floatCast(slot.x)) * @as(f32, @floatFromInt(safe_content_w));
-        const y_f: f32 = @as(f32, @floatCast(slot.y)) * @as(f32, @floatFromInt(safe_content_h));
-        const w_f: f32 = @as(f32, @floatCast(slot.width)) * @as(f32, @floatFromInt(safe_content_w));
-        const h_f: f32 = @as(f32, @floatCast(slot.height)) * @as(f32, @floatFromInt(safe_content_h));
-
-        // Apply divider insets (half-divider on each side adjacent to other splits)
-        var px: i32 = content_x + @as(i32, @intFromFloat(x_f));
-        var py: i32 = content_y + @as(i32, @intFromFloat(y_f));
-        var pw: i32 = @as(i32, @intFromFloat(w_f));
-        var ph: i32 = @as(i32, @intFromFloat(h_f));
-
-        // Inset for dividers (only if not at edge)
-        const half_div = @divTrunc(SPLIT_DIVIDER_WIDTH, 2);
-        const at_left_edge = slot.x < 0.001;
-        const at_right_edge = slot.x + slot.width >= 0.999;
-        if (slot.x > 0.001) {
-            px += half_div;
-            pw -= half_div;
-        }
-        if (slot.x + slot.width < 0.999) {
-            pw -= half_div;
-        }
-        if (slot.y > 0.001) {
-            py += half_div;
-            ph -= half_div;
-        }
-        if (slot.y + slot.height < 0.999) {
-            ph -= half_div;
-        }
-
-        // Extend splits at left edge to window edge (consistent left margin)
-        if (at_left_edge) {
-            px -= @intCast(DEFAULT_PADDING);
-            pw += @intCast(DEFAULT_PADDING);
-        }
-
-        // Extend splits at right edge to window edge (so scrollbar hugs window edge)
-        if (at_right_edge) {
-            pw += @intCast(DEFAULT_PADDING);
-        }
-        pw = @max(pw, 1);
-        ph = @max(ph, 1);
+        const rect = panePixelRect(slot, content);
 
         // Surface-only work: resize the terminal and track resize-overlay
         // bookkeeping. Non-terminal panes (e.g. previews) have no grid to size,
         // so we skip this entirely and store zero cols/rows for them.
         if (entry.pane.surface()) |surface| {
-            // Set the surface screen size with padding.
-            // The surface computes grid size and balanced padding internally.
-            // Right padding must account for scrollbar width plus gap.
-            const scrollbar_padding: u32 = @intFromFloat(overlays.SCROLLBAR_WIDTH + DEFAULT_PADDING);
-            const explicit_padding = renderer.size.Padding{
-                .top = DEFAULT_PADDING,
-                .bottom = DEFAULT_PADDING,
-                .left = DEFAULT_PADDING,
-                .right = scrollbar_padding,
-            };
-
-            const resized = surface.setScreenSizeWithPolicy(
-                if (pw > 0) @intCast(pw) else 1,
-                if (ph > 0) @intCast(ph) else 1,
-                font.cell_width,
-                font.cell_height,
-                explicit_padding,
-                resize_policy,
-            );
+            const resized = surface.setScreenSizeWithPolicy(desktopLayout(rect, content, slot), resize_policy);
 
             if (resized) {
-                AppWindow.g_force_rebuild = true;
+                AppWindow.applyUiEffect(.{ .needs_rebuild = true });
                 // Show resize overlay with new dimensions (but not during divider drag,
                 // which has its own per-surface overlay logic)
                 if (!input.g_divider_dragging) {
@@ -383,10 +423,10 @@ pub fn computeSplitLayout(
         }
 
         g_split_rects[count] = .{
-            .x = px,
-            .y = py,
-            .width = pw,
-            .height = ph,
+            .x = rect.x,
+            .y = rect.y,
+            .width = rect.w,
+            .height = rect.h,
             .cols = if (entry.pane.surface()) |s| s.size.grid.cols else 0,
             .rows = if (entry.pane.surface()) |s| s.size.grid.rows else 0,
             .pane = entry.pane,

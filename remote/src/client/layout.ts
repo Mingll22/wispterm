@@ -36,6 +36,7 @@ function normalizeSurface(raw: unknown): LayoutSurface | null {
     id: surface.id,
     kind: surface.kind === "ai_chat" ? "ai_chat" : "terminal",
     readOnly: surface.readOnly === true,
+    terminalControl: surface.terminalControl === true,
     title: typeof surface.title === "string" ? surface.title : shortSurfaceId(surface.id),
     focused: surface.focused === true,
     snapshot: typeof surface.snapshot === "string" ? surface.snapshot : "",

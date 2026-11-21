@@ -27,31 +27,42 @@ const COALESCE_MS = 25;
 loop: xev.Loop,
 stop: xev.Async,
 coalesce: xev.Timer,
+lease_timer: xev.Timer,
 
 /// Completions — must be stable pointers (not moved while in use).
 wakeup_c: xev.Completion = .{},
 stop_c: xev.Completion = .{},
 coalesce_c: xev.Completion = .{},
 coalesce_cancel_c: xev.Completion = .{},
+lease_c: xev.Completion = .{},
 
 /// Pending coalesced resize (latest wins). Writer-thread-only.
 coalesce_data: ?geometry.GridSize = null,
 
 /// Whether the coalesce timer is currently active.
 coalesce_active: bool = false,
+lease_timer_active: bool = false,
 
 /// Back-pointer to the surface, set during threadMain.
 surface: ?*Surface = null,
 
 pub fn init() !Thread {
+    var loop = try xev.Loop.init(.{});
+    errdefer loop.deinit();
+    var stop = try xev.Async.init();
+    errdefer stop.deinit();
+    var coalesce = try xev.Timer.init();
+    errdefer coalesce.deinit();
     return .{
-        .loop = try xev.Loop.init(.{}),
-        .stop = try xev.Async.init(),
-        .coalesce = try xev.Timer.init(),
+        .loop = loop,
+        .stop = stop,
+        .coalesce = coalesce,
+        .lease_timer = try xev.Timer.init(),
     };
 }
 
 pub fn deinit(self: *Thread) void {
+    self.lease_timer.deinit();
     self.coalesce.deinit();
     self.stop.deinit();
     self.loop.deinit();
@@ -82,6 +93,7 @@ fn wakeupCallback(
         if (self.surface) |surface| surface.failIo(.event_loop, err);
         return .disarm;
     };
+    self.armLeaseTimer();
     self.drainMailbox();
     return .rearm;
 }
@@ -125,24 +137,52 @@ fn drainMailbox(self: *Thread) void {
         if (accepts) self.handleResize(grid);
     }
 
-    // Payload lane: flush every queued write in order. writeToPty() self-gates
-    // on acceptsInput(), so writes to a stopped surface are freed, not sent.
+    // Payload lane: flush in order, checking the lease generation right before
+    // admitting each write. A takeover can invalidate writes already queued.
     while (surface.mailbox.popWrite()) |msg| {
         defer msg.deinit();
         switch (msg) {
-            .write_small => |payload| writeToPty(surface, payload.data[0..payload.len]),
-            .write_alloc => |payload| writeToPty(surface, payload.data),
+            .write_small => |payload| writeToPty(surface, payload.data[0..payload.len], payload.input_epoch),
+            .write_alloc => |payload| writeToPty(surface, payload.data, payload.input_epoch),
             .resize, .resize_immediate => unreachable, // resize never enters the payload ring
         }
     }
 }
 
-fn writeToPty(surface: *Surface, data: []const u8) void {
-    if (!surface.acceptsInput()) return;
+fn writeToPty(surface: *Surface, data: []const u8, input_epoch: ?u64) void {
+    if (!surface.admitPtyWrite(input_epoch)) return;
     surface.pty.writeInput(data) catch |err| {
         surface.failIo(.pty_write, err);
         return;
     };
+}
+
+fn armLeaseTimer(self: *Thread) void {
+    if (self.lease_timer_active) return;
+    const surface = self.surface orelse return;
+    const delay_ms = surface.remoteControlRemainingMs() orelse return;
+    self.lease_timer_active = true;
+    self.lease_timer.run(&self.loop, &self.lease_c, delay_ms, Thread, self, leaseTimerCallback);
+}
+
+fn leaseTimerCallback(
+    self_opt: ?*Thread,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    result: xev.Timer.RunError!void,
+) xev.CallbackAction {
+    const self = self_opt orelse return .disarm;
+    self.lease_timer_active = false;
+    result catch |err| {
+        if (self.surface) |surface| surface.failIo(.event_loop, err);
+        return .disarm;
+    };
+    // Renewals only move the deadline later. If the old deadline elapsed
+    // before the new one, re-arm from the async callback with the remainder.
+    if (self.surface) |surface| {
+        if (surface.remoteControlRemainingMs() != null) surface.mailbox.notify();
+    }
+    return .disarm;
 }
 
 fn handleResize(self: *Thread, grid: geometry.GridSize) void {
@@ -199,8 +239,15 @@ fn applyResize(surface: *Surface, grid: geometry.GridSize) void {
 
     // PTY resize first (like Ghostty), then terminal.
     // The ReadThread is concurrently in a blocking PTY read. This keeps
-    // backend output draining while resize side effects are emitted.
+    // backend output draining while resize side effects are emitted. Set the
+    // output fence under the render lock, which the reader uses to publish.
+    surface.render_state.mutex.lock();
+    const pixels = surface.prepareResize(grid) orelse {
+        surface.render_state.mutex.unlock();
+        return;
+    };
     surface.resize_in_progress.store(true, .release);
+    surface.render_state.mutex.unlock();
     defer surface.resize_in_progress.store(false, .release);
 
     surface.pty.setSize(.{ .ws_col = grid.cols, .ws_row = grid.rows }) catch |err| {
@@ -216,8 +263,9 @@ fn applyResize(surface: *Surface, grid: geometry.GridSize) void {
         return;
     };
     defer surface.render_state.mutex.unlock();
-    surface.terminal.width_px = @intFromFloat(@as(f32, @floatFromInt(grid.cols)) * surface.size.cell.width);
-    surface.terminal.height_px = @intFromFloat(@as(f32, @floatFromInt(grid.rows)) * surface.size.cell.height);
+    surface.terminal.width_px = pixels.width;
+    surface.terminal.height_px = pixels.height;
+    surface.commitTerminalGridLocked(grid);
 
     // Match Ghostty's Termio.resize behavior: a resize is allowed to break
     // synchronized output mode so TUI redraws become visible immediately.

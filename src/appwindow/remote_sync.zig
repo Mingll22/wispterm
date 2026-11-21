@@ -43,9 +43,16 @@ pub fn syncLayout(host: Host, allocator: std.mem.Allocator) void {
     const now = std.time.milliTimestamp();
     if (!host.state.remote.shouldSendLayout(now, 250)) return;
 
+    const grid_epoch = hub.currentGridEpoch();
     const layout = buildLayoutJson(host, allocator) catch return;
     defer allocator.free(layout);
-    hub.sendLayout(layout);
+    if (!hub.sendLayoutIfCurrent(layout, grid_epoch)) host.state.remote.forceNextLayout();
+}
+
+/// Background or minimized tabs can commit a grid without needing a frame.
+pub fn syncPendingGridLayout(host: Host, allocator: std.mem.Allocator) void {
+    const hub = host.hub orelse return;
+    if (hub.layoutNeedsGridRefresh()) syncLayout(host, allocator);
 }
 
 pub fn buildLayoutJson(host: Host, allocator: std.mem.Allocator) ![]u8 {
@@ -106,18 +113,20 @@ fn appendLayoutJson(host: Host, allocator: std.mem.Allocator, out: *std.ArrayLis
             try out.appendSlice(allocator, if (entry.handle == tab_state.focused) "true" else "false");
             try surface_snapshots.appendAgentDetectionJson(allocator, out, entry.surface);
             try appendAgentTranscriptJson(allocator, out, entry.surface);
-            try out.appendSlice(allocator, ",\"cols\":");
-            try out.print(allocator, "{d}", .{entry.surface.size.grid.cols});
-            try out.appendSlice(allocator, ",\"rows\":");
-            try out.print(allocator, "{d}", .{entry.surface.size.grid.rows});
+            if (entry.surface.supportsRemoteControl()) try out.appendSlice(allocator, ",\"terminalControl\":true");
+            var cols: u16 = 0;
+            var rows: u16 = 0;
             var cursor_x: usize = 0;
             var cursor_y: usize = 0;
             {
                 entry.surface.render_state.mutex.lock();
                 defer entry.surface.render_state.mutex.unlock();
+                cols = entry.surface.terminal.cols;
+                rows = entry.surface.terminal.rows;
                 cursor_x = entry.surface.terminal.screens.active.cursor.x;
                 cursor_y = entry.surface.terminal.screens.active.cursor.y;
             }
+            try out.print(allocator, ",\"cols\":{d},\"rows\":{d}", .{ cols, rows });
             try out.appendSlice(allocator, ",\"cursorX\":");
             try out.print(allocator, "{d}", .{cursor_x});
             try out.appendSlice(allocator, ",\"cursorY\":");
@@ -377,6 +386,7 @@ test "remote sync: build layout json includes agent metadata from terminal snaps
     });
     defer surface.terminal.deinit(allocator);
     surface.render_state = renderer.State.init(&surface.terminal);
+    surface.remote_terminal = .{};
     surface.size = .{};
     surface.size.grid.cols = 12;
     surface.size.grid.rows = 4;

@@ -8,6 +8,7 @@ export type LayoutSurface = {
   id: string;
   kind?: "terminal" | "ai_chat";
   readOnly?: boolean;
+  terminalControl?: boolean;
   title?: string;
   focused?: boolean;
   snapshot?: string;
@@ -39,6 +40,11 @@ export type RelayMessage = {
   encoding?: unknown;
   message?: unknown;
   surfaceId?: unknown;
+  clientId?: unknown;
+  leaseId?: unknown;
+  reason?: unknown;
+  cols?: unknown;
+  rows?: unknown;
   wisptermConnected?: unknown;
   activeTab?: unknown;
   tabs?: unknown;
@@ -48,6 +54,10 @@ export type SurfaceView = {
   panel: HTMLElement;
   mount: HTMLDivElement;
   host: HTMLDivElement;
+  control: HTMLElement;
+  controlTitle: HTMLSpanElement;
+  controlStatus: HTMLSpanElement;
+  controlButton: HTMLButtonElement;
   scrollbar: HTMLDivElement;
   scrollbarThumb: HTMLDivElement;
   aiContainer: HTMLDivElement | null;
@@ -63,6 +73,8 @@ export type SurfaceView = {
   disposeCanvasPan: (() => void) | null;
   resizeObserver: ResizeObserver | null;
   fitQueued: boolean;
+  queuedGridChanges: number;
+  measuredGrid: (CanvasSize & { dpr: number; cols: number; rows: number }) | null;
   canvasPan: CanvasPoint;
   lastCanvasViewport: CanvasSize | null;
   needsDefaultCanvasPan: boolean;
@@ -71,7 +83,8 @@ export type SurfaceView = {
   initialSnapshotPending: boolean;
   snapshotText: string | null;
   opened: boolean;
-  pendingOutput: string;
+  pendingTerminalWrites: Array<string | { cols: number; rows: number }>;
+  bufferedOutputLength: number;
   remoteCols: number | null;
   remoteRows: number | null;
 };

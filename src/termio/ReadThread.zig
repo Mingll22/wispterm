@@ -28,14 +28,12 @@ const CHILD_REAP_TIMEOUT_MS: u64 = 250;
 pub fn threadMain(surface: *Surface) void {
     defer surface.markStopped();
 
-    var buf: [READ_BUF_SIZE]u8 = undefined;
-    var resize_pending: std.ArrayListUnmanaged(u8) = .empty;
-    defer resize_pending.deinit(surface.allocator);
-    var output_pending: std.ArrayListUnmanaged(u8) = .empty;
-    defer output_pending.deinit(surface.allocator);
+    var scratch: [READ_BUF_SIZE]u8 = undefined;
+    var pending: std.ArrayListUnmanaged(u8) = .empty;
+    defer pending.deinit(surface.allocator);
 
     while (!surface.exited.load(.acquire)) {
-        const bytes_read = surface.pty.readOutput(&buf) catch |err| {
+        const bytes_read = surface.pty.readOutput(&scratch) catch |err| {
             switch (handleReadError(surface, err)) {
                 .retry => continue,
                 .stop => return,
@@ -48,135 +46,70 @@ pub fn threadMain(surface: *Surface) void {
             return;
         }
 
-        const data = buf[0..bytes_read];
-        if (surface.remote_hub) |hub| {
-            hub.sendOutput(surface.remote_id[0..], data);
-        }
-
-        if (surface.resize_in_progress.load(.acquire)) {
-            resize_pending.appendSlice(surface.allocator, data) catch {
-                resize_pending.clearRetainingCapacity();
-            };
-            drainResizeOutput(surface, &resize_pending, &buf);
-            if (resize_pending.items.len == 0) continue;
-            processOutput(surface, resize_pending.items);
-            resize_pending.clearRetainingCapacity();
-            if (markExitedIfProcessEndedAfterOutput(surface)) return;
-            continue;
-        }
-
-        if (resize_pending.items.len > 0) {
-            resize_pending.appendSlice(surface.allocator, data) catch {
-                processOutput(surface, resize_pending.items);
-                resize_pending.clearRetainingCapacity();
-                processOutputCoalesced(surface, data, &output_pending, &buf);
-                if (markExitedIfProcessEndedAfterOutput(surface)) return;
-                continue;
-            };
-            processOutput(surface, resize_pending.items);
-            resize_pending.clearRetainingCapacity();
-            if (markExitedIfProcessEndedAfterOutput(surface)) return;
-        } else {
-            processOutputCoalesced(surface, data, &output_pending, &buf);
-            if (markExitedIfProcessEndedAfterOutput(surface)) return;
-        }
-    }
-}
-
-fn drainResizeOutput(
-    surface: *Surface,
-    pending: *std.ArrayListUnmanaged(u8),
-    scratch: *[READ_BUF_SIZE]u8,
-) void {
-    while (surface.resize_in_progress.load(.acquire) and !surface.exited.load(.acquire)) {
-        const available = surface.pty.outputAvailable() orelse return;
-
-        if (available == 0) {
+        pending.clearRetainingCapacity();
+        if (!appendOutput(surface, &pending, scratch[0..bytes_read])) return;
+        while (true) {
+            if (!drainAvailableOutput(surface, &pending, &scratch)) return;
+            if (processOutput(surface, pending.items)) break;
+            if (surface.exited.load(.acquire)) return;
+            // The writer is in a native resize. Keep draining its output so
+            // the resize can complete, but wait for the confirmed grid before
+            // publishing these same bytes to the VT and remote transports.
             std.Thread.sleep(std.time.ns_per_ms);
-            continue;
         }
-
-        const to_read = @min(available, scratch.len);
-        const bytes_read = surface.pty.readOutput(scratch[0..to_read]) catch |err| switch (handleReadError(surface, err)) {
-            .retry => continue,
-            .stop => return,
-        };
-
-        if (bytes_read == 0) {
-            if (!surface.exited.load(.acquire)) {
-                surface.markExited(.eof, surface.command.waitUntilReaped(CHILD_REAP_TIMEOUT_MS));
-            }
-            return;
-        }
-
-        const data = scratch[0..bytes_read];
-        if (surface.remote_hub) |hub| {
-            hub.sendOutput(surface.remote_id[0..], data);
-        }
-        pending.appendSlice(surface.allocator, data) catch {
-            pending.clearRetainingCapacity();
-            return;
-        };
+        if (markExitedIfProcessEndedAfterOutput(surface)) return;
     }
 }
 
-fn processOutputCoalesced(
-    surface: *Surface,
-    first: []const u8,
-    pending: *std.ArrayListUnmanaged(u8),
-    scratch: *[READ_BUF_SIZE]u8,
-) void {
-    if (first.len == 0) return;
-
-    pending.clearRetainingCapacity();
-    pending.appendSlice(surface.allocator, first) catch {
-        processOutput(surface, first);
-        return;
+fn appendOutput(surface: *Surface, pending: *std.ArrayListUnmanaged(u8), data: []const u8) bool {
+    pending.appendSlice(surface.allocator, data) catch |err| {
+        surface.failIo(.pty_read, err);
+        return false;
     };
-
-    drainAvailableOutput(surface, pending, scratch);
-    processOutput(surface, pending.items);
+    return true;
 }
 
 fn drainAvailableOutput(
     surface: *Surface,
     pending: *std.ArrayListUnmanaged(u8),
     scratch: *[READ_BUF_SIZE]u8,
-) void {
+) bool {
     while (!surface.exited.load(.acquire)) {
-        const available = surface.pty.outputAvailable() orelse return;
-        const to_read = read_coalesce.nextDrainLen(available, scratch.len, pending.items.len);
-        if (to_read == 0) return;
+        const available = surface.pty.outputAvailable() orelse break;
+        const to_read = if (surface.resize_in_progress.load(.acquire))
+            @min(available, scratch.len)
+        else
+            read_coalesce.nextDrainLen(available, scratch.len, pending.items.len);
+        if (to_read == 0) break;
 
         const bytes_read = surface.pty.readOutput(scratch[0..to_read]) catch |err| switch (handleReadError(surface, err)) {
             .retry => continue,
-            .stop => return,
+            .stop => break,
         };
         if (bytes_read == 0) {
             if (!surface.exited.load(.acquire)) {
                 surface.markExited(.eof, surface.command.waitUntilReaped(CHILD_REAP_TIMEOUT_MS));
             }
-            return;
+            break;
         }
-
-        const data = scratch[0..bytes_read];
-        if (surface.remote_hub) |hub| {
-            hub.sendOutput(surface.remote_id[0..], data);
-        }
-        pending.appendSlice(surface.allocator, data) catch {
-            processOutput(surface, pending.items);
-            pending.clearRetainingCapacity();
-            processOutput(surface, data);
-            return;
-        };
+        if (!appendOutput(surface, pending, scratch[0..bytes_read])) return false;
     }
+    return true;
 }
 
-fn processOutput(surface: *Surface, data: []const u8) void {
-    if (data.len == 0) return;
-
+fn processOutput(surface: *Surface, data: []const u8) bool {
     surface.render_state.mutex.lock();
     defer surface.render_state.mutex.unlock();
+    if (surface.resize_in_progress.load(.acquire)) return false;
+
+    if (surface.remote_hub.load(.acquire)) |hub| {
+        var offset: usize = 0;
+        while (offset < data.len) {
+            const end = @min(offset + READ_BUF_SIZE, data.len);
+            hub.sendOutput(&surface.remote_id, data[offset..end]);
+            offset = end;
+        }
+    }
 
     surface.resetOscBatch();
     surface.feedVtWithWispTermImageFallback(data);
@@ -191,6 +124,7 @@ fn processOutput(surface: *Surface, data: []const u8) void {
     const first_dirty = surface.markOutputDirty();
     const frame_ended = surface.takeSynchronizedFrameEndedLocked();
     if (first_dirty or frame_ended) window_backend.postWakeup();
+    return true;
 }
 
 const ExitAfterOutput = struct {

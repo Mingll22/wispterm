@@ -65,10 +65,10 @@ const pty_write_log = std.log.scoped(.pty_write);
 /// queuePtyWrite still surfaces its outcome — on failure we log a visible
 /// warning instead of silently swallowing input.
 pub fn writeToPty(surface: *Surface, data: []const u8) void {
-    surface.queuePtyWrite(data) catch |err| pty_write_log.warn(
-        "dropped {d} bytes of input: {s}",
-        .{ data.len, @errorName(err) },
-    );
+    surface.queuePtyWrite(data) catch |err| {
+        if (err == error.RemoteControlActive) return;
+        pty_write_log.warn("dropped {d} bytes of input: {s}", .{ data.len, @errorName(err) });
+    };
 }
 
 pub fn writePasteToPty(surface: *Surface, allocator: std.mem.Allocator, data: []const u8) void {
@@ -119,6 +119,7 @@ pub fn writePasteToPty(surface: *Surface, allocator: std.mem.Allocator, data: []
 
 fn initPasteTestSurface(surface: *Surface) !void {
     surface.allocator = std.testing.allocator;
+    surface.remote_terminal = .{};
     surface.terminal = try ghostty_vt.Terminal.init(std.testing.allocator, .{ .cols = 80, .rows = 24 });
     errdefer surface.terminal.deinit(std.testing.allocator);
     surface.render_state = @import("../renderer/State.zig").init(&surface.terminal);

@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { browserTerminalMessage, hostTerminalMessage, type TerminalGridMessage } from "./server/terminal_control_protocol.js";
 
 type Env = {
   ASSETS: Fetcher;
@@ -30,6 +31,7 @@ export class RemoteSession extends DurableObject<Env> {
   private wispterm: WebSocket | null = null;
   private browsers = new Set<WebSocket>();
   private lastLayout: RelayMessage | null = null;
+  private gridsSinceLayout = new Map<string, TerminalGridMessage>();
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -58,11 +60,12 @@ export class RemoteSession extends DurableObject<Env> {
   private attachWispTerm(socket: WebSocket): void {
     this.wispterm?.close(1012, "replaced by a new WispTerm connection");
     this.wispterm = socket;
+    this.gridsSinceLayout.clear();
     this.broadcast({ type: "notice", message: "WispTerm connected" });
     this.broadcastPeerStatus();
 
     socket.addEventListener("message", (event) => {
-      if (typeof event.data !== "string") return;
+      if (this.wispterm !== socket || typeof event.data !== "string") return;
       const message = safeJson(event.data);
       if (!message) return;
 
@@ -81,8 +84,15 @@ export class RemoteSession extends DurableObject<Env> {
           encoding: message.encoding,
           data: message.data,
         });
+      } else if (message.type === "terminal-control-state" || message.type === "terminal-grid") {
+        const terminalMessage = hostTerminalMessage(message);
+        if (terminalMessage) {
+          if (terminalMessage.type === "terminal-grid") this.gridsSinceLayout.set(terminalMessage.surfaceId, terminalMessage);
+          this.broadcast(terminalMessage);
+        }
       } else if (message.type === "layout") {
         this.lastLayout = message;
+        this.gridsSinceLayout.clear();
         this.broadcast(message);
       }
     });
@@ -96,16 +106,19 @@ export class RemoteSession extends DurableObject<Env> {
   }
 
   private attachBrowser(socket: WebSocket): void {
+    const clientId = crypto.randomUUID();
     this.browsers.add(socket);
+    socket.send(JSON.stringify({ type: "terminal-control-client", clientId }));
     socket.send(JSON.stringify({ type: "notice", message: "Browser paired; input enabled" }));
     // Cached layout first, peer status last (see server/session.ts): a stale
     // layout must not leave an offline host looking connected.
     if (this.lastLayout) socket.send(JSON.stringify(this.lastLayout));
+    for (const grid of this.gridsSinceLayout.values()) socket.send(JSON.stringify(grid));
     if (this.wispterm) socket.send(JSON.stringify({ type: "notice", message: "WispTerm connected" }));
     this.sendPeerStatus(socket);
 
     socket.addEventListener("message", (event) => {
-      if (typeof event.data !== "string") return;
+      if (!this.browsers.has(socket) || typeof event.data !== "string") return;
       const message = safeJson(event.data);
       if (!message) return;
 
@@ -115,20 +128,8 @@ export class RemoteSession extends DurableObject<Env> {
       }
       if (message.type === "pong") return;
 
-      if (
-        message.type === "input-bytes" &&
-        typeof message.surfaceId === "string" &&
-        typeof message.data === "string"
-      ) {
-        this.wispterm?.send(
-          JSON.stringify({
-            type: "input-bytes",
-            surfaceId: message.surfaceId,
-            encoding: message.encoding,
-            data: message.data,
-          }),
-        );
-      }
+      const terminalMessage = browserTerminalMessage(message, clientId);
+      if (terminalMessage && this.wispterm) this.wispterm.send(JSON.stringify(terminalMessage));
     });
 
     socket.addEventListener("close", () => {
@@ -136,7 +137,7 @@ export class RemoteSession extends DurableObject<Env> {
     });
   }
 
-  private broadcast(message: RelayMessage): void {
+  private broadcast(message: object): void {
     const data = JSON.stringify(message);
     for (const browser of this.browsers) {
       try {
@@ -329,7 +330,8 @@ function decodeBase64Url(value: string): string {
 
 function safeJson(data: string): RelayMessage | null {
   try {
-    return JSON.parse(data) as RelayMessage;
+    const parsed: unknown = JSON.parse(data);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as RelayMessage : null;
   } catch {
     return null;
   }

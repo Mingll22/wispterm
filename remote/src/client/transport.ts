@@ -2,8 +2,14 @@ import { tr } from "./i18n";
 import type { ConnectionStatus, MeResponse } from "./types";
 import { state, currentTab } from "./state";
 import { isLayoutMessage, normalizeLayout } from "./layout";
-import { decodeHex, encodeHex, safeJson } from "./utils";
+import { decodeHex, encodeHex, safeJson, validPositiveInteger } from "./utils";
 import { saveSessionKey } from "./storage";
+import {
+  isTerminalControlReason,
+  setTerminalControlSender,
+  terminalControl,
+  TERMINAL_LEASE_RENEW_INTERVAL_MS,
+} from "./terminal_control";
 import {
   connectionStatusConnecting,
   connectionStatusForLatency,
@@ -13,8 +19,10 @@ import {
   connectionStatusWithoutPeer,
 } from "./connection_status";
 import {
+  applyTerminalGrid,
   disposeSurfaceViews,
   reconcileSurfaceViews,
+  refitAllSurfaces,
   writeLegacyOutput,
   writeSurfaceBytes,
 } from "./surfaces";
@@ -51,10 +59,22 @@ let reconnectAttempts = 0;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let pingTimer: ReturnType<typeof setInterval> | null = null;
 let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+let leaseTimer: ReturnType<typeof setInterval> | null = null;
 let lastMessageAt = 0;
 let lastPingSentAt = 0;
 let lastLatencyMs: number | null = null;
 let wisptermPeerConnected: boolean | null = null;
+
+setTerminalControlSender((request) => {
+  const ws = state.socket;
+  if (!wisptermPeerConnected || ws?.readyState !== WebSocket.OPEN) return false;
+  try {
+    ws.send(JSON.stringify(request));
+    return true;
+  } catch {
+    return false;
+  }
+});
 
 export function api(path: string, init?: RequestInit): Promise<Response> {
   return fetch(path, {
@@ -78,6 +98,9 @@ export function connect(sessionKey: string): void {
   if (!sessionKey) return;
   state.activeSessionKey = sessionKey;
   cancelReconnect();
+  stopHeartbeat();
+  terminalControl.releaseAll();
+  terminalControl.connect(null);
   state.socket?.close();
   disposeSurfaceViews();
   state.layoutState = null;
@@ -107,6 +130,7 @@ export function connect(sessionKey: string): void {
     if (!wasActive) return;
     stopHeartbeat();
     state.socket = null;
+    terminalControl.connect(null);
     resetConnectionHealth();
     if (state.activeSessionKey === sessionKey) {
       scheduleReconnect();
@@ -135,8 +159,36 @@ export function connect(sessionKey: string): void {
       return;
     }
 
+    if (message.type === "terminal-control-client" && typeof message.clientId === "string") {
+      terminalControl.connect(message.clientId);
+      hooks.onInputUiChanged();
+      return;
+    }
+
+    if (message.type === "terminal-control-state" &&
+        typeof message.surfaceId === "string" &&
+        (message.clientId === null || typeof message.clientId === "string") &&
+        isTerminalControlReason(message.reason)) {
+      const leaseId = validPositiveInteger(message.leaseId);
+      if (terminalControl.receive(
+        message.surfaceId, message.clientId, leaseId, message.reason, document.visibilityState === "visible",
+      )) {
+        hooks.onInputUiChanged();
+        if (message.reason === "expired") refitAllSurfaces();
+      }
+      return;
+    }
+
+    if (message.type === "terminal-grid" && typeof message.surfaceId === "string") {
+      const cols = validPositiveInteger(message.cols);
+      const rows = validPositiveInteger(message.rows);
+      if (cols !== null && rows !== null) applyTerminalGrid(message.surfaceId, cols, rows);
+      return;
+    }
+
     if (message.type === "peer-status") {
       wisptermPeerConnected = message.wisptermConnected === true;
+      if (!wisptermPeerConnected) terminalControl.setDesktopReady(false);
       updateConnectionStatus();
       hooks.onInputUiChanged();
       return;
@@ -144,6 +196,7 @@ export function connect(sessionKey: string): void {
 
     if (isLayoutMessage(message)) {
       wisptermPeerConnected = true;
+      terminalControl.setDesktopReady(true);
       updateConnectionStatus();
       state.layoutState = normalizeLayout(message);
       if (!state.hasSeenLayout) {
@@ -181,6 +234,8 @@ export function disconnect(): void {
   cancelReconnect();
   stopHeartbeat();
   reconnectAttempts = 0;
+  terminalControl.releaseAll();
+  terminalControl.connect(null);
   if (state.socket) {
     try { state.socket.close(); } catch { /* ignore */ }
     state.socket = null;
@@ -192,10 +247,15 @@ export function disconnect(): void {
 export function sendInputBytes(surfaceId: string, data: string): void {
   const ws = state.socket;
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const surface = state.layoutState?.tabs.flatMap((tab) => tab.surfaces).find((entry) => entry.id === surfaceId);
+  if (!surface || surface.readOnly) return;
+  const leaseId = terminalControl.leaseId(surfaceId);
+  if (surface.terminalControl && (leaseId === undefined || document.visibilityState !== "visible")) return;
   ws.send(
     JSON.stringify({
       type: "input-bytes",
       surfaceId,
+      leaseId,
       encoding: "hex",
       data: encodeHex(encoder.encode(data)),
     }),
@@ -219,6 +279,9 @@ function startHeartbeat(ws: WebSocket): void {
     if (ws.readyState !== WebSocket.OPEN) return;
     sendHeartbeatPing(ws);
   }, HEARTBEAT_INTERVAL_MS);
+  leaseTimer = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN && document.visibilityState === "visible") terminalControl.renew();
+  }, TERMINAL_LEASE_RENEW_INTERVAL_MS);
   watchdogTimer = setInterval(() => {
     if (ws.readyState !== WebSocket.OPEN) return;
     if (Date.now() - lastMessageAt > HEARTBEAT_WATCHDOG_MS) {
@@ -228,6 +291,10 @@ function startHeartbeat(ws: WebSocket): void {
 }
 
 function stopHeartbeat(): void {
+  if (leaseTimer !== null) {
+    clearInterval(leaseTimer);
+    leaseTimer = null;
+  }
   if (pingTimer !== null) {
     clearInterval(pingTimer);
     pingTimer = null;
@@ -303,4 +370,5 @@ function resetConnectionHealth(): void {
   lastPingSentAt = 0;
   lastLatencyMs = null;
   wisptermPeerConnected = null;
+  terminalControl.setDesktopReady(false);
 }

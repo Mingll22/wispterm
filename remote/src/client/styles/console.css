@@ -939,12 +939,54 @@
   z-index: 1;
   display: grid;
   min-height: 0;
-  padding: 8px;
+  padding: var(--terminal-mount-padding, 8px);
   border-radius: var(--radius);
   background: var(--terminal-frame-bg);
   overflow: hidden;
 }
 
+
+.terminal-mount[data-terminal-lease] {
+  --terminal-mount-padding: 0px;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: var(--terminal-bg);
+}
+
+.terminal-lease {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  min-width: 0;
+  align-items: center;
+  column-gap: 8px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.terminal-lease-title {
+  overflow: hidden;
+  color: var(--text);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-lease-status,
+.terminal-lease button {
+  white-space: nowrap;
+}
+
+.terminal-lease[hidden] {
+  display: none;
+}
+
+.terminal-lease button {
+  min-height: 28px;
+  padding: 2px 9px;
+  font-size: inherit;
+}
 
 .terminal-host,
 .terminal-host .xterm {
@@ -960,6 +1002,16 @@
   touch-action: none;
   transform-origin: 0 0;
   will-change: transform;
+}
+
+.terminal-mount[data-terminal-lease] .terminal-host {
+  width: auto;
+  height: auto;
+  margin: 6px 8px;
+}
+
+.terminal-mount[data-terminal-lease] .canvas-scrollbar {
+  grid-row: 2;
 }
 
 .terminal-host .xterm {
@@ -981,6 +1033,29 @@
   outline: 1px solid var(--terminal-frame-border);
   outline-offset: 0;
   box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04);
+}
+
+.terminal-mount[data-terminal-lease] .xterm {
+  display: flex;
+  flex-direction: column;
+  justify-content: safe center;
+}
+
+.terminal-mount[data-terminal-grid-fit] .xterm {
+  transform-origin: center;
+}
+
+.terminal-mount[data-terminal-lease] .xterm-scrollable-element {
+  display: flex;
+  flex: none;
+  justify-content: safe center;
+  background-color: transparent !important;
+}
+
+.terminal-mount[data-terminal-lease] .xterm-screen {
+  flex: none;
+  outline: none;
+  box-shadow: none;
 }
 
 .terminal-host .xterm-viewport::-webkit-scrollbar {

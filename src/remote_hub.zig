@@ -1,6 +1,6 @@
 //! WispTerm Remote message hub: the single producer of relay-format messages
-//! (`layout`, `output-bytes`, `open-ai-agent-result`) and the single consumer
-//! of relay-format commands (`input-bytes`, `open-ai-agent`), independent of
+//! (`layout`, terminal grid/state/bytes, `open-ai-agent-result`) and the single
+//! consumer of relay-format terminal/AI commands, independent of
 //! how the bytes travel.
 //!
 //! Surfaces register as sinks here and publish PTY output with their stable
@@ -13,10 +13,14 @@
 //! Message formats match `remote/README.md` "Relay Messages" byte-for-byte.
 
 const std = @import("std");
+const terminal_control = @import("remote_terminal_control.zig");
+const GridSize = @import("core/geometry.zig").GridSize;
 
 var next_surface_counter = std.atomic.Value(u64).init(1);
 
 pub const SurfaceWriteFn = *const fn (ctx: *anyopaque, data: []const u8) void;
+pub const TerminalWriteFn = *const fn (ctx: *anyopaque, data: []const u8, identity: terminal_control.Identity) void;
+pub const TerminalControlFn = *const fn (ctx: *anyopaque, request: terminal_control.Request) void;
 pub const AiAgentOpenStatus = enum {
     opened,
     no_profile,
@@ -28,7 +32,13 @@ pub const TransportSendFn = *const fn (ctx: *anyopaque, message: []const u8) voi
 const SurfaceSink = struct {
     id: [16]u8,
     ctx: *anyopaque,
-    write_fn: SurfaceWriteFn,
+    handler: union(enum) {
+        legacy: SurfaceWriteFn,
+        terminal: struct {
+            write: TerminalWriteFn,
+            control: ?TerminalControlFn,
+        },
+    },
 };
 
 pub const Transport = struct {
@@ -38,12 +48,17 @@ pub const Transport = struct {
 
 pub const Hub = struct {
     allocator: std.mem.Allocator,
+    // Inbound callbacks may publish receipts. Keep the sink lifetime lock
+    // separate from the outbound lock so a receipt can be sent inline.
+    sinks_mutex: std.Thread.Mutex = .{},
     mutex: std.Thread.Mutex = .{},
     surface_sinks: std.ArrayListUnmanaged(SurfaceSink) = .empty,
     transports: std.ArrayListUnmanaged(Transport) = .empty,
     ai_agent_open_ctx: ?*anyopaque = null,
     ai_agent_open_fn: ?AiAgentOpenFn = null,
     last_layout: ?[]u8 = null,
+    grid_epoch: u64 = 0,
+    layout_epoch: u64 = 0,
 
     pub fn create(allocator: std.mem.Allocator) !*Hub {
         const hub = try allocator.create(Hub);
@@ -56,8 +71,10 @@ pub const Hub = struct {
     }
 
     pub fn deinit(self: *Hub) void {
-        self.mutex.lock();
+        self.sinks_mutex.lock();
         self.surface_sinks.deinit(self.allocator);
+        self.sinks_mutex.unlock();
+        self.mutex.lock();
         self.transports.deinit(self.allocator);
         if (self.last_layout) |layout| self.allocator.free(layout);
         self.last_layout = null;
@@ -103,12 +120,19 @@ pub const Hub = struct {
         return self.transports.items.len;
     }
 
-    /// Copy of the most recent layout, for a transport that just (re)connected.
-    pub fn lastLayoutAlloc(self: *Hub, allocator: std.mem.Allocator) ?[]u8 {
+    /// Replay under the same lock as live publication so an older layout
+    /// cannot be inserted into a reconnecting transport after a newer grid.
+    pub fn replayLastLayout(self: *Hub, ctx: *anyopaque) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
-        const last = self.last_layout orelse return null;
-        return allocator.dupe(u8, last) catch null;
+        if (self.layout_epoch != self.grid_epoch) return false;
+        const last = self.last_layout orelse return false;
+        for (self.transports.items) |transport| {
+            if (transport.ctx != ctx) continue;
+            transport.send_fn(ctx, last);
+            return true;
+        }
+        return false;
     }
 
     // ---- outbound ---------------------------------------------------------
@@ -128,18 +152,69 @@ pub const Hub = struct {
         self.broadcast(message);
     }
 
-    /// Remembers the layout for late joiners and broadcasts it when it changed.
-    pub fn sendLayout(self: *Hub, layout_json: []const u8) void {
-        if (layout_json.len == 0) return;
+    pub fn sendTerminalControlState(
+        self: *Hub,
+        surface_id: []const u8,
+        holder: ?*const terminal_control.Holder,
+        reason: terminal_control.Reason,
+    ) void {
+        const message = std.json.Stringify.valueAlloc(self.allocator, .{
+            .type = "terminal-control-state",
+            .surfaceId = surface_id,
+            .clientId = if (holder) |h| h.clientId() else null,
+            .leaseId = if (holder) |h| h.id else null,
+            .reason = @tagName(reason),
+        }, .{}) catch return;
+        defer self.allocator.free(message);
+        self.broadcast(message);
+    }
+
+    /// Called at the termio resize commit, while output publication is fenced.
+    pub fn sendTerminalGrid(self: *Hub, surface_id: []const u8, grid: GridSize) void {
+        var buffer: [128]u8 = undefined;
+        const message = std.fmt.bufPrint(&buffer, "{{\"type\":\"terminal-grid\",\"surfaceId\":\"{s}\",\"cols\":{d},\"rows\":{d}}}", .{ surface_id, grid.cols, grid.rows }) catch unreachable;
         self.mutex.lock();
         defer self.mutex.unlock();
+        self.grid_epoch +%= 1;
+        self.broadcastLocked(message);
+    }
+
+    pub fn currentGridEpoch(self: *Hub) u64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.grid_epoch;
+    }
+
+    pub fn layoutNeedsGridRefresh(self: *Hub) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.layout_epoch != self.grid_epoch;
+    }
+
+    /// Remembers the layout for late joiners and broadcasts it when it changed.
+    pub fn sendLayout(self: *Hub, layout_json: []const u8) void {
+        _ = self.sendLayoutIfCurrent(layout_json, null);
+    }
+
+    /// A resize may commit while the UI builds the snapshot across surfaces.
+    /// Do not publish that older layout after the ordered grid event.
+    pub fn sendLayoutIfCurrent(self: *Hub, layout_json: []const u8, expected_grid_epoch: ?u64) bool {
+        if (layout_json.len == 0) return false;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (expected_grid_epoch) |epoch| if (epoch != self.grid_epoch) return false;
         if (self.last_layout) |last| {
-            if (std.mem.eql(u8, last, layout_json)) return;
+            if (std.mem.eql(u8, last, layout_json)) {
+                self.layout_epoch = self.grid_epoch;
+                return true;
+            }
         }
-        const next_layout = self.allocator.dupe(u8, layout_json) catch return;
+        const next_layout = self.allocator.dupe(u8, layout_json) catch return false;
         if (self.last_layout) |last| self.allocator.free(last);
         self.last_layout = next_layout;
+        self.layout_epoch = self.grid_epoch;
         self.broadcastLocked(next_layout);
+        return true;
     }
 
     fn hasTransports(self: *Hub) bool {
@@ -161,21 +236,34 @@ pub const Hub = struct {
     // ---- sinks ------------------------------------------------------------
 
     pub fn registerSurface(self: *Hub, surface_id: [16]u8, ctx: *anyopaque, write_fn: SurfaceWriteFn) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        for (self.surface_sinks.items) |*sink| {
-            if (std.mem.eql(u8, sink.id[0..], surface_id[0..])) {
-                sink.ctx = ctx;
-                sink.write_fn = write_fn;
+        self.registerSink(.{ .id = surface_id, .ctx = ctx, .handler = .{ .legacy = write_fn } });
+    }
+
+    pub fn registerTerminalSurface(
+        self: *Hub,
+        surface_id: [16]u8,
+        ctx: *anyopaque,
+        write: TerminalWriteFn,
+        control: ?TerminalControlFn,
+    ) void {
+        self.registerSink(.{ .id = surface_id, .ctx = ctx, .handler = .{ .terminal = .{ .write = write, .control = control } } });
+    }
+
+    fn registerSink(self: *Hub, next: SurfaceSink) void {
+        self.sinks_mutex.lock();
+        defer self.sinks_mutex.unlock();
+        for (self.surface_sinks.items) |*registered| {
+            if (std.mem.eql(u8, &registered.id, &next.id)) {
+                registered.* = next;
                 return;
             }
         }
-        self.surface_sinks.append(self.allocator, .{ .id = surface_id, .ctx = ctx, .write_fn = write_fn }) catch {};
+        self.surface_sinks.append(self.allocator, next) catch {};
     }
 
     pub fn unregisterSurface(self: *Hub, surface_id: [16]u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.sinks_mutex.lock();
+        defer self.sinks_mutex.unlock();
         for (self.surface_sinks.items, 0..) |sink, i| {
             if (std.mem.eql(u8, sink.id[0..], surface_id[0..])) {
                 _ = self.surface_sinks.swapRemove(i);
@@ -193,15 +281,27 @@ pub const Hub = struct {
 
     // ---- inbound ----------------------------------------------------------
 
-    /// One relay-format JSON message from any transport. `ping`/`pong` are the
-    /// transport's business and never reach here.
+    /// LAN and legacy inputs carry no trusted browser identity.
     pub fn handleIncomingMessage(self: *Hub, message: []const u8) void {
+        self.handleMessage(message, false);
+    }
+
+    /// The relay stamps the client id from its authenticated WebSocket session.
+    pub fn handleRelayMessage(self: *Hub, message: []const u8) void {
+        self.handleMessage(message, true);
+    }
+
+    fn handleMessage(self: *Hub, message: []const u8, from_relay: bool) void {
+        if (from_relay and (isJsonMessageType(message, "input-bytes") or isJsonMessageType(message, "terminal-control"))) {
+            self.handleRelayTerminalMessage(message);
+            return;
+        }
         if (isJsonMessageType(message, "input-bytes")) {
             const surface_id = extractJsonString(message, "surfaceId") orelse return;
             const hex_data = extractJsonString(message, "data") orelse return;
             const decoded = decodeHexAlloc(self.allocator, hex_data) catch return;
             defer self.allocator.free(decoded);
-            self.dispatchInput(surface_id, decoded);
+            self.dispatchInput(surface_id, decoded, .{});
             return;
         }
         if (isJsonMessageType(message, "open-ai-agent")) {
@@ -210,16 +310,67 @@ pub const Hub = struct {
         }
     }
 
-    fn dispatchInput(self: *Hub, surface_id: []const u8, data: []const u8) void {
+    const RelayTerminalMessage = struct {
+        type: []const u8,
+        surfaceId: []const u8,
+        clientId: ?[]const u8 = null,
+        leaseId: ?u32 = null,
+        action: ?terminal_control.Action = null,
+        cols: ?u16 = null,
+        rows: ?u16 = null,
+        data: ?[]const u8 = null,
+    };
+
+    fn handleRelayTerminalMessage(self: *Hub, message: []const u8) void {
+        const parsed = std.json.parseFromSlice(RelayTerminalMessage, self.allocator, message, .{ .ignore_unknown_fields = true }) catch return;
+        defer parsed.deinit();
+        const wire = parsed.value;
+        if (wire.surfaceId.len != 16) return;
+        if (std.mem.eql(u8, wire.type, "input-bytes")) {
+            const decoded = decodeHexAlloc(self.allocator, wire.data orelse return) catch return;
+            defer self.allocator.free(decoded);
+            self.dispatchInput(wire.surfaceId, decoded, .{ .client_id = wire.clientId, .lease_id = wire.leaseId });
+        } else if (std.mem.eql(u8, wire.type, "terminal-control")) {
+            const cols = wire.cols orelse 0;
+            const rows = wire.rows orelse 0;
+            self.dispatchTerminalControl(wire.surfaceId, .{
+                .client_id = wire.clientId orelse return,
+                .action = wire.action orelse return,
+                .lease_id = wire.leaseId,
+                .grid = if (cols >= 2 and cols <= 512 and rows >= 1 and rows <= 256) .{ .cols = cols, .rows = rows } else null,
+            });
+        }
+    }
+
+    fn dispatchInput(self: *Hub, surface_id: []const u8, data: []const u8, identity: terminal_control.Identity) void {
         if (data.len == 0) return;
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.sinks_mutex.lock();
+        defer self.sinks_mutex.unlock();
         for (self.surface_sinks.items) |sink| {
             if (std.mem.eql(u8, sink.id[0..], surface_id)) {
-                sink.write_fn(sink.ctx, data);
+                switch (sink.handler) {
+                    .legacy => |write| write(sink.ctx, data),
+                    .terminal => |terminal| terminal.write(sink.ctx, data, identity),
+                }
                 return;
             }
         }
+    }
+
+    fn dispatchTerminalControl(self: *Hub, surface_id: []const u8, request: terminal_control.Request) void {
+        self.sinks_mutex.lock();
+        defer self.sinks_mutex.unlock();
+        for (self.surface_sinks.items) |sink| {
+            if (!std.mem.eql(u8, &sink.id, surface_id)) continue;
+            if (sink.handler == .terminal) {
+                if (sink.handler.terminal.control) |control| {
+                    control(sink.ctx, request);
+                    return;
+                }
+            }
+            break;
+        }
+        self.sendTerminalControlState(surface_id, null, .unsupported);
     }
 
     fn dispatchAiAgentOpen(self: *Hub, request_id: []const u8) void {
@@ -444,14 +595,13 @@ test "hub fans output out to every transport and dedupes layouts" {
         a.received.items[0],
     );
 
-    const last = hub.lastLayoutAlloc(allocator).?;
-    defer allocator.free(last);
-    try std.testing.expectEqualStrings("{\"type\":\"layout\",\"activeTab\":0,\"tabs\":[]}", last);
+    try std.testing.expect(hub.replayLastLayout(&b));
+    try std.testing.expectEqualStrings("{\"type\":\"layout\",\"activeTab\":0,\"tabs\":[]}", b.received.items[2]);
 
     hub.removeTransport(&a);
     hub.sendOutput("0000000000000001", "x");
     try std.testing.expectEqual(@as(usize, 2), a.received.items.len);
-    try std.testing.expectEqual(@as(usize, 3), b.received.items.len);
+    try std.testing.expectEqual(@as(usize, 4), b.received.items.len);
 }
 
 test "hub routes input-bytes to the registered surface sink" {
@@ -468,6 +618,66 @@ test "hub routes input-bytes to the registered surface sink" {
     sink.len = 0;
     hub.handleIncomingMessage("{\"type\":\"input-bytes\",\"surfaceId\":\"0000000000000001\",\"encoding\":\"hex\",\"data\":\"41\"}");
     try std.testing.expectEqual(@as(usize, 0), sink.len);
+}
+
+test "only the relay path supplies lease identity to terminal sinks" {
+    const Sink = struct {
+        state: terminal_control.State = .{},
+        received: usize = 0,
+
+        fn control(ctx: *anyopaque, request: terminal_control.Request) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            _ = self.state.apply(request, .{}, 0);
+        }
+
+        fn write(ctx: *anyopaque, data: []const u8, identity: terminal_control.Identity) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (self.state.authorize(identity) != null) self.received += data.len;
+        }
+    };
+    var sink: Sink = .{};
+    var hub = Hub.init(std.testing.allocator);
+    defer hub.deinit();
+    hub.registerTerminalSurface("0000000000000001".*, &sink, Sink.write, Sink.control);
+    const acquire = "{\"type\":\"terminal-control\",\"surfaceId\":\"0000000000000001\",\"clientId\":\"owner\",\"action\":\"acquire\"}";
+    const input = "{\"type\":\"input-bytes\",\"surfaceId\":\"0000000000000001\",\"clientId\":\"owner\",\"leaseId\":1,\"data\":\"41\"}";
+    hub.handleIncomingMessage(acquire);
+    try std.testing.expect(sink.state.holder == null);
+    hub.handleRelayMessage(acquire);
+    try std.testing.expectEqualStrings("owner", sink.state.holder.?.clientId());
+    hub.handleIncomingMessage(input);
+    try std.testing.expectEqual(@as(usize, 0), sink.received);
+    hub.handleRelayMessage(input);
+    try std.testing.expectEqual(@as(usize, 1), sink.received);
+}
+
+test "grid publication invalidates layouts from before the commit" {
+    const allocator = std.testing.allocator;
+    const surface_id = "0000000000000001";
+    var hub = Hub.init(allocator);
+    defer hub.deinit();
+    var transport = TestTransport{ .allocator = allocator };
+    defer transport.deinit();
+    hub.addTransport(&transport, TestTransport.send);
+    const epoch = hub.currentGridEpoch();
+    hub.sendLayout("{\"type\":\"layout\",\"tabs\":[]}");
+    hub.sendTerminalGrid(surface_id, .{ .cols = 1, .rows = 24 });
+    try std.testing.expect(!hub.sendLayoutIfCurrent("{\"type\":\"layout\",\"tabs\":[{}]}", epoch));
+    try std.testing.expect(hub.layoutNeedsGridRefresh());
+    try std.testing.expect(!hub.replayLastLayout(&transport));
+    hub.sendOutput(surface_id, "redraw");
+    try std.testing.expectEqual(@as(usize, 3), transport.received.items.len);
+    try std.testing.expectEqualStrings(
+        "{\"type\":\"terminal-grid\",\"surfaceId\":\"0000000000000001\",\"cols\":1,\"rows\":24}",
+        transport.received.items[1],
+    );
+    try std.testing.expect(isJsonMessageType(transport.received.items[2], "output-bytes"));
+
+    hub.sendTerminalControlState(surface_id, null, .denied);
+    try std.testing.expectEqualStrings(
+        "{\"type\":\"terminal-control-state\",\"surfaceId\":\"0000000000000001\",\"clientId\":null,\"leaseId\":null,\"reason\":\"denied\"}",
+        transport.received.items[3],
+    );
 }
 
 test "open ai agent message dispatches request id" {

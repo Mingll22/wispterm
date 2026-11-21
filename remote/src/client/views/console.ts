@@ -581,7 +581,11 @@ export function updateInputUi(): void {
   const selectedSurface = tab?.surfaces.find((surface) => surface.id === selectedSurfaceId);
   const writable = connected && (Boolean(activeSurfaceIdForInput()) || selectedSurface?.kind === "ai_chat");
   const label = document.querySelector<HTMLSpanElement>("#control-state");
-  if (label) label.hidden = !connected || !selectedSurface || writable;
+  if (label) label.hidden = !connected || !selectedSurface || writable || selectedSurface.terminalControl === true;
+  if (selectedSurface?.terminalControl && !writable) {
+    blurMobileTextInput();
+    if (state.kbdVisible) setKbdVisible(false);
+  }
 
   renderConnectionEmpty();
   updateSurfaceCursors();

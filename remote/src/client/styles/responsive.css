@@ -433,7 +433,7 @@
   }
 
   .panels-stage[data-mobile-mode="single"] .terminal-mount {
-    padding: 4px;
+    padding: var(--terminal-mount-padding, 4px);
     border-radius: var(--radius);
     overflow: hidden;
     touch-action: none;

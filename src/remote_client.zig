@@ -166,11 +166,6 @@ pub const Client = struct {
         self.condition.signal();
     }
 
-    fn replayLastLayout(self: *Client) void {
-        const layout = self.hub.lastLayoutAlloc(self.allocator) orelse return;
-        self.enqueueOwnedMessage(layout);
-    }
-
     fn popMessage(self: *Client) ?[]u8 {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -216,7 +211,7 @@ fn threadMain(client: *Client) void {
 
         client.state.store(.connected, .release);
         std.debug.print("Remote client connected\n", .{});
-        client.replayLastLayout();
+        _ = client.hub.replayLastLayout(client);
 
         var next_heartbeat_ms = std.time.milliTimestamp() + HEARTBEAT_INTERVAL_MS;
         while (!client.stop_requested.load(.acquire) and connection_alive.load(.acquire)) {
@@ -292,7 +287,7 @@ fn receiveThreadMain(client: *Client, websocket: remote_transport.WebSocketHandl
             }
             if (remote_hub.isJsonMessageType(message, "pong")) continue;
 
-            client.hub.handleIncomingMessage(message);
+            client.hub.handleRelayMessage(message);
         }
     }
 }
