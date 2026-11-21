@@ -682,41 +682,45 @@
   font-variant-numeric: tabular-nums;
 }
 
-.connection-log {
+.connection-health {
   gap: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--panel);
 }
 
-.connection-log summary {
+.connection-health summary {
   padding-inline: 10px;
   font-weight: 600;
 }
 
-.connection-log[open] summary {
+.connection-health[open] summary {
   border-bottom: 1px solid var(--line);
 }
 
-.notice-log {
-  max-block-size: 9.5rem;
+.connection-health-rows {
   margin: 0;
   padding: 0 10px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  list-style: none;
   color: var(--muted);
   font-size: 13px;
   line-height: 1.45;
-  overflow-wrap: anywhere;
 }
 
-.notice-log li {
+.connection-health-rows > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
   padding-block: 8px;
 }
 
-.notice-log li + li {
+.connection-health-rows > div + div {
   border-top: 1px solid var(--line);
+}
+
+.connection-health-rows dd {
+  margin: 0;
+  color: var(--text);
+  font-weight: 600;
 }
 
 .status-dot {

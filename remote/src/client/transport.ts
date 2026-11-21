@@ -1,13 +1,15 @@
 import { tr } from "./i18n";
 import type { ConnectionStatus, MeResponse } from "./types";
-import { state, currentTab, pushNotice } from "./state";
+import { state, currentTab } from "./state";
 import { isLayoutMessage, normalizeLayout } from "./layout";
 import { decodeHex, encodeHex, safeJson } from "./utils";
 import { saveSessionKey } from "./storage";
 import {
   connectionStatusConnecting,
   connectionStatusForLatency,
+  connectionStatusMeasuringLatency,
   connectionStatusOffline,
+  connectionStatusWaitingForDesktop,
   connectionStatusWithoutPeer,
 } from "./connection_status";
 import {
@@ -24,16 +26,12 @@ const RECONNECT_MAX_DELAY_MS = 30_000;
 
 type TransportHooks = {
   onWorkspaceChanged: () => void;
-  onNoticesChanged: () => void;
   onInputUiChanged: () => void;
   setStatus: (status: ConnectionStatus) => void;
 };
 
 let hooks: TransportHooks = {
   onWorkspaceChanged: () => {
-    // wired by views/console
-  },
-  onNoticesChanged: () => {
     // wired by views/console
   },
   onInputUiChanged: () => {
@@ -48,11 +46,6 @@ export function setTransportHooks(next: TransportHooks): void {
   hooks = next;
 }
 
-const RELAY_NOTICE_LABELS = new Map([
-  ["WispTerm connected", tr("Desktop connected", "桌面端已连接")],
-  ["WispTerm disconnected", tr("Desktop disconnected", "桌面端已断开")],
-]);
-
 const encoder = new TextEncoder();
 let reconnectAttempts = 0;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -61,7 +54,7 @@ let watchdogTimer: ReturnType<typeof setInterval> | null = null;
 let lastMessageAt = 0;
 let lastPingSentAt = 0;
 let lastLatencyMs: number | null = null;
-let wisptermPeerConnected = false;
+let wisptermPeerConnected: boolean | null = null;
 
 export function api(path: string, init?: RequestInit): Promise<Response> {
   return fetch(path, {
@@ -83,7 +76,6 @@ export async function loadMe(): Promise<MeResponse> {
 
 export function connect(sessionKey: string): void {
   if (!sessionKey) return;
-  if (state.activeSessionKey !== sessionKey) state.notices = [];
   state.activeSessionKey = sessionKey;
   cancelReconnect();
   state.socket?.close();
@@ -94,7 +86,6 @@ export function connect(sessionKey: string): void {
   resetConnectionHealth();
   saveSessionKey(sessionKey);
   hooks.onWorkspaceChanged();
-  hooks.onNoticesChanged();
   hooks.onInputUiChanged();
 
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -103,14 +94,10 @@ export function connect(sessionKey: string): void {
   hooks.setStatus(connectionStatusConnecting(tr("Connecting...", "正在连接…")));
   hooks.onInputUiChanged();
 
-  let relayConnected = false;
   ws.addEventListener("open", () => {
     if (state.socket !== ws) return;
-    relayConnected = true;
     reconnectAttempts = 0;
     updateConnectionStatus();
-    pushNotice(tr("Relay connected", "中继已连接"));
-    hooks.onNoticesChanged();
     hooks.onInputUiChanged();
     startHeartbeat(ws);
   });
@@ -122,10 +109,6 @@ export function connect(sessionKey: string): void {
     state.socket = null;
     resetConnectionHealth();
     if (state.activeSessionKey === sessionKey) {
-      pushNotice(relayConnected
-        ? tr("Relay disconnected", "中继连接已断开")
-        : tr("Could not connect to the relay", "未能连接中继"));
-      hooks.onNoticesChanged();
       scheduleReconnect();
     } else {
       hooks.setStatus(connectionStatusOffline());
@@ -189,11 +172,6 @@ export function connect(sessionKey: string): void {
       const surfaceId = typeof message.surfaceId === "string" ? message.surfaceId : state.selectedSurfaceId;
       const bytes = decodeHex(message.data);
       if (surfaceId && bytes) writeSurfaceBytes(surfaceId, bytes);
-    } else if (message.type === "notice" && typeof message.message === "string") {
-      // Older relays announce a browser attachment even when the desktop is offline.
-      if (message.message === "Browser paired; input enabled") return;
-      pushNotice(RELAY_NOTICE_LABELS.get(message.message) ?? message.message);
-      hooks.onNoticesChanged();
     }
   });
 }
@@ -306,12 +284,16 @@ function updateConnectionStatus(): void {
     hooks.setStatus(connectionStatusOffline());
     return;
   }
+  if (wisptermPeerConnected === null) {
+    hooks.setStatus(connectionStatusWaitingForDesktop());
+    return;
+  }
   if (!wisptermPeerConnected) {
     hooks.setStatus(connectionStatusWithoutPeer(lastLatencyMs));
     return;
   }
   if (lastLatencyMs === null) {
-    hooks.setStatus(connectionStatusConnecting(tr("Connected · measuring latency...", "已连接 · 正在测量延迟…")));
+    hooks.setStatus(connectionStatusMeasuringLatency());
     return;
   }
   hooks.setStatus(connectionStatusForLatency(lastLatencyMs));
@@ -320,5 +302,5 @@ function updateConnectionStatus(): void {
 function resetConnectionHealth(): void {
   lastPingSentAt = 0;
   lastLatencyMs = null;
-  wisptermPeerConnected = false;
+  wisptermPeerConnected = null;
 }

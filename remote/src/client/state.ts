@@ -11,7 +11,6 @@ export const state = {
   selectedTabIndex: 0,
   selectedSurfaceId: null as string | null,
   surfaceViews: new Map<string, SurfaceView>(),
-  notices: [] as string[],
   hasSeenLayout: false,
   kbdVisible: false,
   drawerOpen: false,
@@ -40,11 +39,6 @@ export function activeSurfaceIdForInput(): string | null {
   const surface = tab?.surfaces.find((candidate) => candidate.id === surfaceId);
   if (surface?.kind === "ai_chat") return null;
   return surface?.readOnly ? null : surfaceId;
-}
-
-export function pushNotice(message: string): void {
-  if (state.notices.at(-1) === message) return;
-  state.notices = [...state.notices.slice(-5), message];
 }
 
 export function resetSurfaceViews(): void {
