@@ -2,15 +2,15 @@
 
 ## Version Sources
 
-The desktop app version has one source of truth: `build.zig.zon`. Build options
-export that value as `build_options.app_version`, and it drives
-`wispterm --version`, package `version.txt` output, release notes, and the
-command center `Version` entry.
+The desktop app version comes from [build.zig.zon](../build.zig.zon).
+[build.zig](../build.zig) exports it as `build_options.app_version`. Use that
+value throughout the app. Before tagging or publishing a desktop release,
+check the matching tests and [release notes](../release-notes/), the packaged
+`version.txt`, `wispterm.exe --version`, and the command center `Version` entry
+against the manifest version.
 
-The WispTerm Remote web console/relay under `remote/` is a separate package with
-its own version surfaces (`remote/package.json`, `remote/package-lock.json`,
-`remote/src/client/version.ts`, and the rendered web label). Do not bump Remote
-versions for a desktop-only release.
+Use the [Remote release checklist](../remote/README.md#remote-versions) when
+the release explicitly includes the Web console.
 
 ## Building
 
@@ -27,6 +27,14 @@ development should use PowerShell and direct `zig` commands. Always use
 `zig build` for development; only use `zig build -Doptimize=ReleaseFast` for
 final/shipping builds.
 
+`defaultDevelopmentTarget()` in [build.zig](../build.zig) selects
+`x86_64-windows-gnu`. A normal Windows development build can use that default.
+After a debug build, confirm the expected executable:
+
+```powershell
+Get-Item .\zig-out\bin\wispterm.exe
+```
+
 ### macOS
 
 ```bash
@@ -35,15 +43,15 @@ zig build macos-app -Dtarget=x86_64-macos    # Intel .app bundle
 open zig-out/bin/WispTerm.app                 # launch the built app
 ```
 
-Requires macOS 13+ and Zig 0.15.2. The build produces a `.app` bundle at
-`zig-out/bin/WispTerm.app`. For distribution, run the packaging script
-(`packaging/macos/package.sh`) which signs and creates a `.dmg`.
+Build with the native Apple SDK and the toolchain below. For distribution, use
+the [macOS packaging script](../packaging/macos/package.sh) to sign the bundle
+and create a `.dmg`.
 
-The app's minimum macOS is `macos_minimum_version` in `build.zig` (12.0, with
-macOS 12 best-effort). A macOS `-Dtarget` without a version is pinned to it,
-and the generated `Info.plist` `LSMinimumSystemVersion` follows the binary's
-deployment target. No hosted CI runner can launch macOS 12, so two build
-steps guard the minimum statically. CI runs both:
+`macos_minimum_version` in [build.zig](../build.zig) sets the oldest deployment
+target, supported on a best-effort basis. The build pins an unversioned macOS
+`-Dtarget` to it and generates `LSMinimumSystemVersion` from the binary target.
+The [CI workflow](../.github/workflows/ci.yml) checks both the minimum and the
+availability of newer APIs:
 
 ```bash
 zig build check-macos-availability                         # Objective-C API newer than the minimum without @available
@@ -57,8 +65,8 @@ check, so give the receiver its concrete type.
 
 ### Zig Toolchain
 
-Use Zig 0.15.2 and make sure `zig` (or `zig.exe` on Windows) is available on
-`PATH`. Check the active version:
+Use `.minimum_zig_version` in [build.zig.zon](../build.zig.zon) to select Zig.
+With `zig` or `zig.exe` on `PATH`, check the installed version:
 
 ```bash
 zig version
@@ -66,43 +74,60 @@ zig version
 
 When the checkout and Zig's global package cache are on different Windows drives,
 set `ZIG_GLOBAL_CACHE_DIR` to a cache directory on the checkout drive before
-running `zig build test-full`. Zig 0.15.2 dependency build steps can otherwise
-pass an absolute cross-drive child path to `convertPathArg`. For an E: checkout:
+running `zig build test-full`. Dependency build steps can otherwise pass an
+absolute cross-drive child path to `convertPathArg`:
 
 ```powershell
 $env:ZIG_GLOBAL_CACHE_DIR = "$(Get-Location)\.zig-global-cache"
-```
-
-On Windows, `build.zig` defaults to `x86_64-windows-gnu`, so a normal
-development build does not need an explicit `-Dtarget`. On macOS, pass
-`-Dtarget=aarch64-macos` (Apple Silicon) or `-Dtarget=x86_64-macos` (Intel)
-explicitly.
-
-After a successful Windows debug build, the expected artifact is:
-
-```powershell
-Test-Path .\zig-out\bin\wispterm.exe
-Get-Item .\zig-out\bin\wispterm.exe
 ```
 
 ### Tests and structural guards
 
 ```bash
 zig build test         # fast inner loop: platform-independent logic (src/test_fast.zig)
-zig build test-full    # complete pre-merge gate; a SUPERSET of `zig build test`
+zig build test-full    # desktop pre-merge gate, also runs the fast suite
 zig build check-sizes  # the file-size backstop on its own
 ```
 
-`zig build test` is sub-second when cached and does not recompile the heavy app
-binary; `zig build test-full` is the gate to run before finishing a change and
-now also runs the fast suite.
+The fast suite runs platform-independent logic on the host. Register new pure
+unit-tested modules in [src/test_fast.zig](../src/test_fast.zig). A standalone
+pure module can also run with `zig test src/<module>.zig`. Put Windows-only
+tests in the target-coupled suite or guard them with
+`if (builtin.os.tag != .windows) return error.SkipZigTest;`.
 
-Architecture is enforced by source-scan ratchet tests under `src/source_guards/`
-(file size, top-level `g_*` globals, `AppWindow` import-hub re-exports, and
-direct UI dirty-writes). Each freezes today's count so it can only **shrink** —
-adding a new occurrence fails the gate. The cohesion/coupling rationale and the
-frozen ceilings are in [`../AGENTS.md`](../AGENTS.md) and
-[decoupling-guide.md §8](decoupling-guide.md#8-structural-debt-governance-axis-b-in-practice).
+The fast suite reads `input.zig` as text for its source checks. Compiled
+`input.zig` tests require the full app suite or `zig build test-macos-ui` on
+macOS. [build.zig](../build.zig) defines the test steps and targets. For changes
+in watched files, read the [guard list and reduction rules](decoupling-guide.md#82-the-boundary-guards-srcsource_guards).
+
+## Keyboard shortcut changes
+
+When changing bindings in [src/keybind.zig](../src/keybind.zig),
+[src/input.zig](../src/input.zig), or an input handler, update the
+[README shortcut table](../README.md#keyboard-shortcuts). Check the
+[startup shortcut overlay](../src/renderer/overlays/startup_shortcuts.zig) and
+[command palette entries](../src/renderer/overlays.zig) for matching text.
+Preserve hints generated from live bindings and update fixed hints that describe
+the changed shortcut.
+
+## Frame-latency diagnostics
+
+To investigate an overlay that responds only after an incidental redraw, set
+`wispterm-debug-render = true` in the [config file](configuration.md) or set
+`WISPTERM_RENDER_DIAGNOSTICS=1` in the app process environment. On macOS, prefer
+the config key when launching through `open`. To pass the variable directly, run
+`WISPTERM_RENDER_DIAGNOSTICS=1 ./zig-out/bin/WispTerm.app/Contents/MacOS/WispTerm`.
+
+Search for `frame-latency` in `%APPDATA%\wispterm\render-diagnostic.log` on
+Windows or `~/Library/Application Support/wispterm/render-diagnostic.log` on
+macOS. `input->present count=… p50=… p95=… max=…` measures same-iteration CPU
+latency through draw submission, before display sync and compositing. `STALL`
+records input that produced no frame in its own iteration and is excluded from
+the percentiles. A repeatable stall on overlay navigation calls for checking
+the handler's [repaint effect](architecture.md#event-driven-repaint). Bare
+modifiers and unfocused keys can legitimately produce no frame. See the
+[logger](../src/render_diagnostics.zig), [timing stats](../src/appwindow/frame_latency.zig),
+and [main-loop wiring](../src/AppWindow.zig) when changing the probe.
 
 ## Why The UI Is Custom Drawn
 

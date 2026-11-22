@@ -11,6 +11,11 @@ Relay server for WispTerm remote access. Provides:
 The browser mirrors WispTerm tabs and split panels from layout snapshots, then
 routes input back to the selected surface.
 
+For `remote/` planning and implementation, follow this console and relay's
+existing architecture, browser constraints, and the approved Web and mobile
+behavior. The desktop Ghostty reference requirement does not apply here. When a
+Remote change reaches desktop Zig code, use the desktop contracts for that code.
+
 ## Tabs and split panels
 
 On a connected desktop that supports workspace actions, **New tab** opens the
@@ -205,7 +210,21 @@ Production starts must still provide real `ADMIN_USERNAME`,
 Set `REMOTE_COOKIE_SECURE=false` only for plain-HTTP local testing —
 production must keep cookies marked `Secure` and front the server with HTTPS.
 
+Run `npm run typecheck` and `npm test` here when changing the client or relays.
+For a Node relay artifact, run `npm run build:docker`. The
+[package scripts](package.json) define these entry points.
+
 ---
+
+## Remote versions
+
+Change the Remote version only when the user explicitly includes the Web
+console in the release. Keep [package.json](package.json),
+[package-lock.json](package-lock.json), and [src/client/version.ts](src/client/version.ts)
+in sync for that release. Verify the rendered label on both login and console
+through `remoteBrandMarkup()` or `webVersionLabel()`, including when the build
+injects a build-time label. For a desktop release, follow the
+[desktop version checklist](../docs/development.md#version-sources).
 
 ## Routes (both deployments)
 
