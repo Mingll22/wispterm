@@ -1,4 +1,5 @@
 import { tr } from "./i18n";
+import { watchPointer } from "./pointer_drag";
 import type { LayoutTab } from "./types";
 import {
   paneDropEdge,
@@ -231,26 +232,4 @@ function positionTrack(handle: HTMLElement, track: Omit<SplitTrack, "paths">): v
   handle.style.width = inX ? "" : percent(track.end - track.start);
   handle.style.height = inX ? percent(track.end - track.start) : "";
   handle.setAttribute("aria-valuenow", String(Math.round(track.at * 100)));
-}
-
-function watchPointer(
-  handle: HTMLElement,
-  start: PointerEvent,
-  move: (event: PointerEvent) => void,
-  finish: (committed: boolean) => void,
-): () => void {
-  const pointerId = start.pointerId;
-  const listeners = new AbortController();
-  const options = { signal: listeners.signal };
-  function end(committed: boolean): void {
-    listeners.abort();
-    if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
-    finish(committed);
-  }
-  handle.setPointerCapture(pointerId);
-  handle.addEventListener("pointermove", (event) => { if (event.pointerId === pointerId) move(event); }, options);
-  handle.addEventListener("pointerup", (event) => { if (event.pointerId === pointerId) end(true); }, options);
-  handle.addEventListener("lostpointercapture", (event) => { if (event.pointerId === pointerId) end(false); }, options);
-  handle.addEventListener("pointercancel", (event) => { if (event.pointerId === pointerId) end(false); }, options);
-  return () => end(false);
 }

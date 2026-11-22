@@ -391,6 +391,25 @@ pub fn activeSurface() ?*Surface {
     return t.focusedSurface();
 }
 
+/// Queue a user-initiated write to a terminal on the active desktop tab.
+pub fn queueDesktopTerminalInput(surface: *Surface, data: []const u8) Surface.QueueWriteError!void {
+    if (data.len == 0) return;
+    surface.queuePtyWrite(data) catch |err| {
+        if (err != error.RemoteControlActive) return err;
+        const t = activeTab() orelse return err;
+        if (t.remote_tab_control.lease.grant == null) return err;
+        var it = t.tree.surfaces();
+        while (it.next()) |entry| {
+            if (entry.surface != surface) continue;
+            _ = t.reclaimRemoteTabControl(.desktop, .coalesced);
+            // The rejected write was not enqueued. Send the same bytes under
+            // the desktop epoch after every member's old epoch was fenced.
+            return surface.queuePtyWrite(data);
+        }
+        return err;
+    };
+}
+
 pub fn activeAiChat() ?*ai_chat.Session {
     if (g_tab_count == 0) return null;
     const t = g_tabs[active_tab_state.g_active_tab] orelse return null;

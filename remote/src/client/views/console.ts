@@ -35,6 +35,7 @@ import { bindVirtualKeyboard, renderVirtualKeyboardMarkup, syncVirtualKeyboardIn
 import { MOBILE_VISUAL_ZOOM_LEVELS, mobileVisualZoomLabel } from "../mobile_visual_zoom";
 import { selectedMobileSurfaceKind, shouldShowMobileVirtualKeyboard } from "../mobile_surface_mode";
 import { remoteTabSelectionSidebarAction } from "../sidebar_behavior";
+import { bindSidebarResize } from "../sidebar_resize";
 import {
   bindActionText,
   bridgeStatusText,
@@ -64,6 +65,7 @@ const LANGUAGE_SETTINGS_RETURN_KEY = "wispterm.remote.languageSettingsReturn";
 let currentConnectionStatus: ConnectionStatus = connectionStatusOffline(tr("Offline", "未连接"));
 let statusLatencyHideTimer: ReturnType<typeof setTimeout> | null = null;
 let workspaceControls: ReturnType<typeof bindWorkspaceControls> | null = null;
+let syncSidebarWidth: (() => void) | null = null;
 
 export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   cleanupWeixinPanel();
@@ -210,6 +212,9 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
           </div>
         </div>
       </aside>
+      <div id="sidebar-resizer" class="sidebar-resizer" role="separator" tabindex="0" aria-orientation="vertical"
+        aria-controls="sidebar" aria-label="${tr("Sidebar width", "调整侧栏宽度")}"
+        title="${tr("Drag to resize sidebar", "拖动调整侧栏宽度")}"></div>
       <div class="collapsed-controls">
         <button type="button" class="icon-button desktop-sidebar-toggle glass-surface" id="sidebar-expand" aria-label="${tr("Open sidebar", "打开侧栏")}" title="${tr("Open sidebar", "打开侧栏")}" aria-controls="sidebar" aria-expanded="${!state.sidebarCollapsed}">
           ${iconMenu()}
@@ -356,6 +361,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
     const zoom = MOBILE_VISUAL_ZOOM_LEVELS.find((level) => String(level) === input.value);
     if (zoom !== undefined) setMobileVisualZoom(zoom);
   });
+  syncSidebarWidth = bindSidebarResize(app.querySelector<HTMLElement>(".console-shell")!, app.querySelector<HTMLElement>("#sidebar-resizer")!);
   bindViewportRefit();
   bindVirtualKeyboard(() => setKbdVisible(false));
   bindMobileTextInput();
@@ -848,7 +854,9 @@ function syncWorkspacePanelMode(): void {
 
 function bindViewportRefit(): void {
   const refit = (): void => {
-    applyVisualViewportSizing(document.querySelector<HTMLElement>(".console-shell"));
+    const shell = document.querySelector<HTMLElement>(".console-shell");
+    if (shell) syncSidebarWidth?.();
+    applyVisualViewportSizing(shell);
     refitAllSurfaces();
   };
 

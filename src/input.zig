@@ -2107,18 +2107,11 @@ pub threadlocal var g_click_y: f64 = 0; // Y position of initial click
 const RuntimeState = struct {
     selection_changed_for_copy: bool = false,
     left_click_tracker: click_tracker.ClickTracker = .{},
+    // Route a reported press's drag and release to the same terminal.
+    mouse_report: mouse_dispatch.TerminalMouseReportState(*Surface) = .{},
 };
 threadlocal var g_runtime_state: RuntimeState = .{};
 
-// Terminal mouse reporting drag state. When a press is delivered to the PTY
-// (the focused program enabled mouse tracking and Shift wasn't held), the
-// matching drag-motion and release are routed to the PTY too — until the
-// button lifts — instead of driving local text selection. See
-// input/mouse_report.zig for the protocol encoder.
-// The reported-drag state machine (begin/finish/motion-dedupe) lives in
-// input/mouse_dispatch.zig as a pure, std-only helper; input.zig owns the one
-// instance and supplies the I/O (report target, PTY write, focus).
-threadlocal var g_mouse_report: mouse_dispatch.TerminalMouseReportState(*Surface) = .{};
 const MULTI_CLICK_INTERVAL_MS: i64 = 500;
 const MAX_SELECTION_COLS: usize = 4096;
 
@@ -3143,7 +3136,7 @@ fn dispatchChar(ev: platform_input.CharEvent) ui_effect.UiEffect {
     }
     var buf: [4]u8 = undefined;
     const len = std.unicode.utf8Encode(ev.codepoint, &buf) catch return .none;
-    writeToPty(surface, buf[0..len]);
+    _ = writeToPty(surface, buf[0..len], .desktop);
     return .none;
 }
 
@@ -4205,24 +4198,20 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
             // Preserve the established Ctrl+A..Z control-byte path.
             if (ev.ctrl and !ev.shift and !ev.alt and !ev.super and is_ascii_letter) {
                 const ctrl_char: u8 = @intCast(ev.key_code - 0x41 + 1);
-                writeToPty(surface, &[_]u8{ctrl_char});
-                wrote_to_pty = true;
+                wrote_to_pty = writeToPty(surface, &[_]u8{ctrl_char}, .desktop);
             } else if (ev.ctrl and !ev.alt and is_ascii_key) {
                 // Kitty/modify-other-keys lets Pi distinguish Ctrl+Shift and
                 // Ctrl+punctuation chords; protocol-off returns null safely.
                 if (input_shortcuts.terminalAsciiKeyEncode(opts, ev.key_code, mods, &kitty_buf)) |s| {
-                    writeToPty(surface, s);
-                    wrote_to_pty = true;
+                    wrote_to_pty = writeToPty(surface, s, .desktop);
                 }
             } else if (ev.alt and !ev.ctrl and !ev.super and is_ascii_key) {
                 if (input_shortcuts.terminalAsciiKeyEncode(opts, ev.key_code, mods, &kitty_buf)) |s| {
-                    writeToPty(surface, s);
-                    wrote_to_pty = true;
+                    wrote_to_pty = writeToPty(surface, s, .desktop);
                 } else if (ascii_code) |code| {
                     // Legacy fallback for terminals without Kitty/modify-other-keys.
                     const ch: u8 = if (ev.shift and code >= 'a' and code <= 'z') code - 32 else code;
-                    writeToPty(surface, &[_]u8{ 0x1b, ch });
-                    wrote_to_pty = true;
+                    wrote_to_pty = writeToPty(surface, &[_]u8{ 0x1b, ch }, .desktop);
                 }
             }
             break :blk null;
@@ -4230,8 +4219,7 @@ fn dispatchKey(ev: platform_input.KeyEvent) ui_effect.UiEffect {
     };
 
     if (seq) |s| {
-        writeToPty(surface, s);
-        wrote_to_pty = true;
+        wrote_to_pty = writeToPty(surface, s, .desktop);
     }
 
     // Only scroll to bottom and reset cursor blink when we actually sent
@@ -7063,8 +7051,8 @@ fn handleMouseMove(ev: platform_input.MouseMoveEvent) void {
 
     // Reported mouse drag: stream motion to the PTY (button/any tracking
     // modes) and suppress local hover/selection while the button is held.
-    if (g_mouse_report.active()) |button| {
-        if (g_mouse_report.activeSurface()) |surface| reportMouseMotion(surface, button, ev);
+    if (g_runtime_state.mouse_report.active()) |button| {
+        if (g_runtime_state.mouse_report.activeSurface()) |surface| reportMouseMotion(surface, button, ev);
         return;
     }
 
@@ -7411,8 +7399,7 @@ fn sendTerminalMouseReport(
     _ = mouse_report.encode(mode, fmt, action, button, mods, cell.col, cell.row, pixel.x, pixel.y, &buf, &len);
     surface.render_state.mutex.unlock();
     if (len == 0) return false;
-    writeToPty(surface, buf[0..len]);
-    return true;
+    return writeToPty(surface, buf[0..len], if (action == .press) .desktop else .preserve_control);
 }
 
 /// The surface that should receive a mouse report for an event at (x, y), or
@@ -7443,12 +7430,13 @@ fn beginTerminalMouseReport(ev: platform_input.MouseButtonEvent) bool {
     const surface = terminalMouseReportTarget(ev.x, ev.y) orelse return false;
     const button = platformMouseButton(ev.button);
     updateFocusFromMouse(ev.x, ev.y);
-    _ = sendTerminalMouseReport(surface, .press, button, ev.x, ev.y, .{
+    if (sendTerminalMouseReport(surface, .press, button, ev.x, ev.y, .{
         .shift = ev.shift,
         .alt = ev.alt,
         .ctrl = ev.ctrl,
-    });
-    g_mouse_report.begin(surface, button);
+    })) {
+        g_runtime_state.mouse_report.begin(surface, button);
+    }
     return true;
 }
 
@@ -7456,7 +7444,7 @@ fn beginTerminalMouseReport(ev: platform_input.MouseButtonEvent) bool {
 /// regardless of modifiers) so the app always sees button-up and state never
 /// leaks. Returns true if a matching reported press was in progress.
 fn finishTerminalMouseReport(ev: platform_input.MouseButtonEvent) bool {
-    const result = g_mouse_report.finishRelease(platformMouseButton(ev.button));
+    const result = g_runtime_state.mouse_report.finishRelease(platformMouseButton(ev.button));
     if (!result.matched) return false;
     if (result.surface) |s| {
         _ = sendTerminalMouseReport(s, .release, result.button, ev.x, ev.y, .{
@@ -7476,7 +7464,7 @@ fn reportMouseMotion(surface: *Surface, button: mouse_report.Button, ev: platfor
         defer surface.render_state.mutex.unlock();
         break :blk mouseToSurfaceCell(surface, @floatFromInt(ev.x), @floatFromInt(ev.y));
     };
-    if (!g_mouse_report.motionShouldReport(.{ .col = cell.col, .row = cell.row })) return;
+    if (!g_runtime_state.mouse_report.motionShouldReport(.{ .col = cell.col, .row = cell.row })) return;
     _ = sendTerminalMouseReport(surface, .motion, button, ev.x, ev.y, .{
         .shift = ev.shift,
         .alt = ev.alt,
@@ -7740,7 +7728,7 @@ fn handleMouseWheel(ev: platform_input.MouseWheelEvent) void {
     }
 
     if (sent_to_terminal) {
-        writeToPty(surface, terminal_input_buf[0..terminal_input_len]);
+        _ = writeToPty(surface, terminal_input_buf[0..terminal_input_len], .preserve_control);
     }
 }
 

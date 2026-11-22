@@ -47,23 +47,32 @@
 }
 
 .workspace-tab-actions .icon-button {
+  --action-highlight: var(--terminal-focus);
   width: 30px;
   height: 30px;
   padding: 0;
   border: 0;
   background: transparent;
+  transition:
+    color var(--motion-duration) var(--motion-ease),
+    scale var(--motion-duration) var(--motion-ease);
 }
 
-.workspace-tab-actions .icon-button:hover:enabled {
-  background: var(--ghost-bg-strong);
+.workspace-tab-actions .icon-button:enabled:is(:active, :focus-visible) {
+  color: var(--action-highlight);
+  scale: 1.16;
+}
+
+@media (hover: hover) {
+  .workspace-tab-actions .icon-button:hover:enabled {
+    color: var(--action-highlight);
+    scale: 1.16;
+  }
 }
 
 .workspace-tab-actions .tab-delete {
+  --action-highlight: var(--danger);
   color: var(--muted);
-}
-
-.workspace-tab-actions .tab-delete:hover:enabled {
-  color: var(--danger);
 }
 
 .collapsed-tab-actions {
@@ -74,23 +83,10 @@
 .collapsed-tab-actions .icon-button {
   width: var(--workspace-header-height);
   height: var(--workspace-header-height);
-  border: 1px solid var(--line);
-  background: var(--glass-bg);
-}
-
-.workspace-tab-actions .tab-control-toggle {
-  color: var(--accent-ink);
-  background: var(--accent);
-}
-
-.workspace-tab-actions .tab-control-toggle:hover:enabled {
-  background: var(--accent);
-  filter: brightness(0.9);
 }
 
 .workspace-tab-actions .tab-control-toggle[data-held] {
-  color: var(--text);
-  background: var(--ghost-bg-strong);
+  opacity: 0.82;
 }
 
 .workspace-tab-actions svg,
@@ -212,14 +208,16 @@
   cursor: row-resize;
 }
 
-.workspace-splitter::after {
+.workspace-splitter::after,
+.sidebar-resizer::after {
   content: "";
   border-radius: 3px;
   background: var(--muted);
   opacity: 0.45;
 }
 
-.workspace-splitter[data-axis="x"]::after {
+.workspace-splitter[data-axis="x"]::after,
+.sidebar-resizer::after {
   width: 3px;
   height: min(32px, 70%);
 }
@@ -231,6 +229,20 @@
 
 .workspace-splitter:is(:hover, :focus-visible)::after {
   opacity: 1;
+}
+
+.sidebar-resizer:is(:hover, :focus-visible, [data-dragging])::after {
+  background: var(--terminal-focus);
+  opacity: 1;
+}
+
+.sidebar-resizer:focus-visible {
+  outline: none;
+}
+
+.sidebar-resizer:focus-visible::after {
+  outline: 1px solid var(--terminal-focus);
+  outline-offset: 2px;
 }
 
 .workspace-splitter[aria-disabled="true"] {
