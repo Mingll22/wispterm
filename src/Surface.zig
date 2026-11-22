@@ -20,6 +20,8 @@ const Config = @import("config.zig");
 const Renderer = @import("renderer/Renderer.zig");
 const RemoteHub = @import("remote_hub.zig");
 const remote_control = @import("remote_terminal_control.zig");
+const remote_image_paste = @import("remote_image_paste.zig");
+const terminal_paste = @import("terminal_paste.zig");
 const GridSize = @import("core/geometry.zig").GridSize;
 const remote_transport = @import("platform/remote_transport.zig");
 const threading = @import("platform/threading.zig");
@@ -942,6 +944,8 @@ pub fn setSshConnection(
 }
 
 pub fn setSshConnectionValue(self: *Surface, conn: SshConnection) void {
+    self.remote_terminal.mutex.lock();
+    defer self.remote_terminal.mutex.unlock();
     self.launch_kind = .ssh;
     self.ssh_connection = conn;
 }
@@ -1377,6 +1381,21 @@ pub fn supportsTabControl(self: *const Surface) bool {
     return self.remote_terminal.enabled;
 }
 
+pub fn supportsRemoteImagePaste(self: *Surface) bool {
+    if (builtin.os.tag != .windows or !self.remote_terminal.enabled or !self.acceptsInput()) return false;
+    self.remote_terminal.mutex.lock();
+    defer self.remote_terminal.mutex.unlock();
+    return self.launch_kind != .ssh;
+}
+
+pub fn usesBracketedPaste(self: *Surface) bool {
+    // Snapshot the negotiated mode under the same lock as the VT reader. The
+    // paste encoder and PTY mailbox can run after the reader is unblocked.
+    self.render_state.mutex.lock();
+    defer self.render_state.mutex.unlock();
+    return self.terminal.modes.get(.bracketed_paste);
+}
+
 pub fn remoteControlActive(self: *Surface) bool {
     if (!self.remote_terminal.enabled) return false;
     self.remote_terminal.mutex.lock();
@@ -1580,8 +1599,59 @@ fn queuePtyWriteImpl(self: *Surface, data: []const u8, epoch: ?u64) QueueWriteEr
 pub fn attachRemoteHub(self: *Surface, hub: ?*RemoteHub.Hub) void {
     self.remote_hub.store(hub, .release);
     if (hub) |h| {
-        h.registerTerminalSurface(self.remote_id, self, remoteWrite, if (self.remote_terminal.enabled) remoteControlRequest else null);
+        h.registerTerminalSurface(
+            self.remote_id,
+            self,
+            remoteWrite,
+            if (self.remote_terminal.enabled) remoteControlRequest else null,
+            if (builtin.os.tag == .windows and self.remote_terminal.enabled)
+                .{ .authorize = authorizeRemoteImagePaste, .enqueue = enqueueRemoteImagePaste }
+            else
+                null,
+        );
     }
+}
+
+fn authorizeRemoteImagePaste(ctx: *anyopaque, identity: remote_control.Identity) remote_image_paste.Authorization {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    if (!surface.acceptsInput()) return .unsupported;
+    if (identity.origin != .relay or (identity.lease_id orelse 0) == 0 or identity.client_id == null)
+        return .denied;
+
+    surface.remote_terminal.mutex.lock();
+    defer surface.remote_terminal.mutex.unlock();
+    const kind: remote_image_paste.TargetKind = switch (surface.launch_kind) {
+        .local => .local,
+        .wsl => .wsl,
+        .ssh => return .unsupported,
+    };
+    surface.expireRemoteControlLocked();
+    const epoch = surface.remote_terminal.state.authorize(identity) orelse return .denied;
+    return .{ .accepted = .{ .kind = kind, .epoch = epoch } };
+}
+
+fn enqueueRemoteImagePaste(
+    ctx: *anyopaque,
+    identity: remote_control.Identity,
+    expected: remote_image_paste.Target,
+    text: []const u8,
+) remote_image_paste.Status {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    const allocator = surface.allocator;
+    const encoded = terminal_paste.encode(allocator, text, surface.usesBracketedPaste()) catch return .failed;
+    defer if (encoded) |bytes| allocator.free(bytes);
+
+    switch (authorizeRemoteImagePaste(ctx, identity)) {
+        .accepted => |target| {
+            if (target.epoch != expected.epoch or target.kind != expected.kind) return .denied;
+        },
+        .denied => return .denied,
+        .unsupported => return .unsupported,
+    }
+    // The writer fences the whole paste against any lease changes after this
+    // check, using the same epoch as other leased terminal input.
+    surface.queuePtyWriteImpl(encoded orelse text, expected.epoch) catch return .failed;
+    return .queued;
 }
 
 fn remoteWrite(ctx: *anyopaque, data: []const u8, identity: remote_control.Identity) void {
@@ -2750,4 +2820,44 @@ test "exit status message shows the reconnect hint only when asked" {
     var buf2: [256]u8 = undefined;
     const no_hint = formatIoStatusMessage(&buf2, state, false).?;
     try std.testing.expect(std.mem.indexOf(u8, no_hint, "Press Enter to reconnect") == null);
+}
+
+test "remote image paste queues one bracketed PTY write under the same live lease epoch" {
+    var surface: Surface = undefined;
+    try writeOutcomeHarness(&surface);
+    defer writeOutcomeHarnessDeinit(&surface);
+    surface.terminal = try ghostty_vt.Terminal.init(std.testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer surface.terminal.deinit(std.testing.allocator);
+    surface.render_state = renderer.State.init(&surface.terminal);
+    surface.terminal.modes.set(.bracketed_paste, true);
+    surface.launch_kind = .wsl;
+    surface.remote_hub = .init(null);
+    surface.confirmed_grid = .init(packGrid(.{}));
+    surface.remote_terminal.enabled = true;
+    surface.remote_terminal.clock = try std.time.Timer.start();
+
+    const owner = "f9615093-77ee-4431-bfed-ab436d8510d3";
+    var identity: remote_control.Identity = .{ .client_id = owner };
+    try std.testing.expect(authorizeRemoteImagePaste(&surface, identity) == .denied);
+    var lease: remote_control.TabLease = .{};
+    _ = lease.apply(.{
+        .type = "tab-control",
+        .tabId = "0000000000000001".*,
+        .clientId = owner,
+        .action = .acquire,
+    }, try std.time.Instant.now());
+    surface.remote_terminal.state.mirrorTab(true, lease.grant, surface.confirmedGrid());
+    identity.lease_id = lease.grant.?.id;
+    const paste_text = "\"/mnt/c/Temp folder/wispterm-clipboard-random.png\"";
+    const target = authorizeRemoteImagePaste(&surface, identity).accepted;
+    try std.testing.expectEqual(.queued, enqueueRemoteImagePaste(&surface, identity, target, paste_text));
+
+    const message = surface.mailbox.popWrite() orelse return error.MissingImagePaste;
+    defer message.deinit();
+    try std.testing.expectEqualStrings("\x1b[200~" ++ paste_text ++ "\x1b[201~", message.write_small.data[0..message.write_small.len]);
+    try std.testing.expect(surface.admitPtyWrite(message.write_small.input_epoch));
+    surface.remote_terminal.state.mirrorTab(true, null, surface.confirmedGrid());
+    try std.testing.expect(!surface.admitPtyWrite(message.write_small.input_epoch));
+    try std.testing.expectEqual(.denied, enqueueRemoteImagePaste(&surface, identity, target, paste_text));
+    try std.testing.expect(surface.mailbox.popWrite() == null);
 }

@@ -190,6 +190,7 @@ fn appendLayoutJson(host: Host, allocator: std.mem.Allocator, out: *std.ArrayLis
             try surface_snapshots.appendAgentDetectionJson(allocator, out, entry.surface);
             try appendAgentTranscriptJson(allocator, out, entry.surface);
             if (entry.surface.supportsRemoteControl()) try out.appendSlice(allocator, ",\"terminalControl\":true");
+            if (entry.surface.supportsRemoteImagePaste()) try out.appendSlice(allocator, ",\"imagePaste\":true");
             var cols: u16 = 0;
             var rows: u16 = 0;
             var cursor_x: usize = 0;

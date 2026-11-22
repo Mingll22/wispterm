@@ -309,6 +309,36 @@ function messages(socket: FakeSocket): Array<Record<string, unknown>> {
   return socket.sent.map((message) => JSON.parse(message));
 }
 
+test("terminal image paste forwards only valid leased payloads and returns receipts privately", () => {
+  const session = new RemoteSession("alpha");
+  const host = new FakeSocket(), browser = new FakeSocket(), observer = new FakeSocket();
+  session.attachWispTerm(host as never);
+  session.attachBrowser(browser as never);
+  session.attachBrowser(observer as never);
+  const clientId = messages(browser)[0].clientId;
+  const observerClientId = messages(observer)[0].clientId;
+  const request = {
+    type: "terminal-image-paste", requestId: "image_1", surfaceId: "0000000000000001",
+    leaseId: 4, mime: "image/png", data: "iVBORw0KGgo=",
+  };
+  receive(browser, { ...request, leaseId: undefined });
+  receive(browser, { ...request, data: "AA=\n" });
+  receive(browser, { ...request, mime: "image/svg+xml" });
+  receive(browser, { ...request, data: "AAAA".repeat(Math.ceil(4 * 1024 * 1024 / 3)) });
+  assert.equal(host.sent.length, 0);
+
+  receive(browser, { ...request, clientId: observerClientId });
+  assert.deepEqual(messages(host).at(-1), { ...request, clientId });
+  const beforeObserver = observer.sent.length;
+  const receipt = { type: "terminal-image-paste-result", requestId: "image_1", status: "queued" };
+  receive(host, { ...receipt, clientId });
+  assert.deepEqual(messages(browser).at(-1), receipt);
+  assert.equal(observer.sent.length, beforeObserver);
+  host.emit("close");
+  receive(browser, { ...request, requestId: "image_2" });
+  assert.deepEqual(messages(browser).at(-1), { ...receipt, requestId: "image_2", status: "offline" });
+});
+
 test("a late browser gets the snapshot layout before subsequent grid changes", () => {
   const session = new RemoteSession("alpha");
   const host = new FakeSocket();

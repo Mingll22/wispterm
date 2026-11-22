@@ -16,46 +16,7 @@ const file_drop_path = @import("file_drop_path.zig");
 const ai_chat_composer_layout = @import("../assistant/conversation/composer_layout.zig");
 const i18n = @import("../i18n.zig");
 
-fn isPasteStripByte(byte: u8) bool {
-    return switch (byte) {
-        0x00, // NUL
-        0x08, // BS
-        0x05, // ENQ
-        0x04, // EOT
-        0x1B, // ESC
-        0x7F, // DEL
-        0x03, // VINTR (Ctrl+C)
-        0x1C, // VQUIT (Ctrl+\)
-        0x15, // VKILL (Ctrl+U)
-        0x1A, // VSUSP (Ctrl+Z)
-        0x11, // VSTART (Ctrl+Q)
-        0x13, // VSTOP (Ctrl+S)
-        0x17, // VWERASE (Ctrl+W)
-        0x16, // VLNEXT (Ctrl+V)
-        0x12, // VREPRINT (Ctrl+R)
-        0x0F, // VDISCARD (Ctrl+O)
-        => true,
-        else => false,
-    };
-}
-
-fn pasteNeedsMutation(data: []const u8, bracketed: bool) bool {
-    for (data) |byte| {
-        if (isPasteStripByte(byte)) return true;
-        if (!bracketed and byte == '\n') return true;
-    }
-    return false;
-}
-
-fn mutatePasteData(data: []u8, bracketed: bool) void {
-    for (data) |*byte| {
-        if (isPasteStripByte(byte.*)) {
-            byte.* = ' ';
-        } else if (!bracketed and byte.* == '\n') {
-            byte.* = '\r';
-        }
-    }
-}
+const terminal_paste = @import("../terminal_paste.zig");
 
 const pty_write_log = std.log.scoped(.pty_write);
 
@@ -79,47 +40,14 @@ pub fn writeToPty(surface: *Surface, data: []const u8, origin: TerminalInputOrig
 fn writePasteToPty(surface: *Surface, allocator: std.mem.Allocator, data: []const u8, origin: TerminalInputOrigin) void {
     if (data.len == 0) return;
 
-    // Like Ghostty's completeClipboardPaste, snapshot the negotiated mode under
-    // the same lock used by the PTY reader. Release it before allocating or
-    // waiting for mailbox capacity so output processing can keep progressing.
-    const bracketed = bracketed: {
-        surface.render_state.mutex.lock();
-        defer surface.render_state.mutex.unlock();
-        break :bracketed surface.terminal.modes.get(.bracketed_paste);
-    };
+    const bracketed = surface.usesBracketedPaste();
     pty_write_log.debug("paste: bracketed={} bytes={d}", .{ bracketed, data.len });
-
-    if (bracketed) {
-        // A paste is one input transaction. Three independent queue writes can
-        // lose a fencepost under backpressure or interleave a terminal reply
-        // with the body. Queue the entire frame or deliver none of it.
-        const start = "\x1b[200~";
-        const end = "\x1b[201~";
-        const framed = std.mem.concat(allocator, u8, &.{ start, data, end }) catch |err| {
-            pty_write_log.warn("could not encode paste: {s}", .{@errorName(err)});
-            return;
-        };
-        defer allocator.free(framed);
-        mutatePasteData(framed[start.len .. framed.len - end.len], true);
-        _ = writeToPty(surface, framed, origin);
+    const encoded = terminal_paste.encode(allocator, data, bracketed) catch |err| {
+        pty_write_log.warn("could not encode paste: {s}", .{@errorName(err)});
         return;
-    }
-
-    var owned: ?[]u8 = null;
-    var body = data;
-    if (pasteNeedsMutation(data, false)) {
-        owned = allocator.dupe(u8, data) catch |err| {
-            pty_write_log.warn("could not encode paste: {s}", .{@errorName(err)});
-            return;
-        };
-        mutatePasteData(owned.?, false);
-        body = owned.?;
-    }
-    defer {
-        if (owned) |buf| allocator.free(buf);
-    }
-
-    _ = writeToPty(surface, body, origin);
+    };
+    defer if (encoded) |bytes| allocator.free(bytes);
+    _ = writeToPty(surface, encoded orelse data, origin);
 }
 
 fn initPasteTestSurface(surface: *Surface) !void {
@@ -334,11 +262,6 @@ test "desktop terminal input reclaims just the touched tab and queues its first 
     try std.testing.expectEqual(other_lease, other.remote_tab_control.lease.grant.?.id);
 }
 
-fn quotePathForPaste(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
-    if (std.mem.indexOfAny(u8, path, " \t\"") == null) return allocator.dupe(u8, path) catch null;
-    return std.fmt.allocPrint(allocator, "\"{s}\"", .{path}) catch null;
-}
-
 fn clipboardImageBasename(path: []const u8) []const u8 {
     var start: usize = 0;
     for (path, 0..) |ch, i| {
@@ -449,7 +372,7 @@ fn pasteSavedClipboardImage(surface: *Surface, allocator: std.mem.Allocator, ima
     const target_path = imagePathForSurfacePaste(allocator, surface, image_path) orelse return false;
     defer allocator.free(target_path);
 
-    const pasted = quotePathForPaste(allocator, target_path) orelse return false;
+    const pasted = terminal_paste.quotePath(allocator, target_path) catch return false;
     defer allocator.free(pasted);
 
     std.debug.print("Pasting clipboard image path: {s}\n", .{target_path});

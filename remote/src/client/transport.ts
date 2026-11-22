@@ -2,6 +2,7 @@ import { tr } from "./i18n";
 import type { ConnectionStatus, LayoutTab, MeResponse, RelayMessage } from "./types";
 import { isWorkspaceId, type WorkspaceAction, type WorkspaceResult } from "../workspace_protocol";
 import type { TabControlRequest } from "../tab_control_protocol";
+import { isTerminalImageMime, isTerminalImageStatus, MAX_TERMINAL_IMAGE_BYTES } from "../server/terminal_image_protocol";
 import { state, currentTab, inputLeaseId, tabControlId } from "./state";
 import { isLayoutMessage, normalizeLayout, resolveLayoutSelection } from "./layout";
 import { decodeHex, encodeHex, safeJson, validPositiveInteger } from "./utils";
@@ -14,6 +15,7 @@ import {
   type TerminalControlRequest,
 } from "./terminal_control";
 import { setTabControlSender, tabControl } from "./tab_control";
+import type { ImagePasteOutcome } from "./terminal_clipboard";
 import {
   connectionStatusConnecting,
   connectionStatusForLatency,
@@ -36,6 +38,7 @@ const HEARTBEAT_WATCHDOG_MS = 50_000;
 const RECONNECT_MIN_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
 const WORKSPACE_ACTION_TIMEOUT_MS = 10_000;
+const IMAGE_PASTE_TIMEOUT_MS = 20_000;
 
 type ActionBody<T> = T extends WorkspaceAction ? Omit<T, "type" | "requestId" | "leaseId"> : never;
 export type WorkspaceCommand = ActionBody<WorkspaceAction>;
@@ -79,6 +82,11 @@ let pendingWorkspaceAction: {
   finish: (status: WorkspaceActionStatus) => void;
   created?: { tabId: string; surfaceId: string };
 } | null = null;
+let pendingImagePaste: {
+  requestId: string;
+  timer: ReturnType<typeof setTimeout>;
+  finish: (status: ImagePasteOutcome) => void;
+} | null = null;
 
 function sendControlRequest(request: TerminalControlRequest | TabControlRequest): boolean {
   const ws = state.socket;
@@ -120,6 +128,7 @@ export function connect(sessionKey: string): void {
   connectRemoteControl(null);
   state.socket?.close();
   finishWorkspaceAction("offline");
+  finishImagePaste("offline");
   disposeSurfaceViews();
   state.layoutState = null;
   state.selectedSurfaceId = null;
@@ -149,6 +158,7 @@ export function connect(sessionKey: string): void {
     stopHeartbeat();
     state.socket = null;
     finishWorkspaceAction("offline");
+    finishImagePaste("offline");
     connectRemoteControl(null);
     resetConnectionHealth();
     if (state.activeSessionKey === sessionKey) {
@@ -225,6 +235,7 @@ export function connect(sessionKey: string): void {
         terminalControl.setDesktopReady(false);
         tabControl.setDesktopReady(false);
         finishWorkspaceAction("offline");
+        finishImagePaste("offline");
       }
       updateConnectionStatus();
       hooks.onInputUiChanged();
@@ -233,6 +244,12 @@ export function connect(sessionKey: string): void {
 
     if (message.type === "workspace-action-result") {
       receiveWorkspaceActionResult(message);
+      return;
+    }
+    if (message.type === "terminal-image-paste-result") {
+      if (pendingImagePaste && message.requestId === pendingImagePaste.requestId && isTerminalImageStatus(message.status)) {
+        finishImagePaste(message.status);
+      }
       return;
     }
 
@@ -275,6 +292,7 @@ export function disconnect(): void {
   releaseRemoteControl();
   connectRemoteControl(null);
   finishWorkspaceAction("offline");
+  finishImagePaste("offline");
   if (state.socket) {
     try { state.socket.close(); } catch { /* ignore */ }
     state.socket = null;
@@ -300,10 +318,14 @@ export function workspaceActionAvailable(tab?: LayoutTab): boolean {
     (!controlId || tabControl.leaseId(controlId) !== undefined);
 }
 
+function createRequestId(): string {
+  return Array.from(crypto.getRandomValues(new Uint32Array(4)), (word) => word.toString(16).padStart(8, "0")).join("");
+}
+
 export function sendWorkspaceAction(command: WorkspaceCommand): Promise<WorkspaceActionStatus> {
   const socket = state.socket;
   if (!socket || !workspaceActionAvailable()) return Promise.resolve("offline");
-  const requestId = Array.from(crypto.getRandomValues(new Uint32Array(4)), (word) => word.toString(16).padStart(8, "0")).join("");
+  const requestId = createRequestId();
   let leaseId: number | undefined;
   if (command.action === "rename-tab" && !state.layoutState?.tabRename) return Promise.resolve("unsupported");
   if (command.action !== "create-tab" && command.action !== "rename-tab" && state.layoutState?.tabControl) {
@@ -388,6 +410,64 @@ export function sendInputBytes(surfaceId: string, data: string): void {
       data: encodeHex(encoder.encode(data)),
     }),
   );
+}
+
+export function sendTerminalImagePaste(surfaceId: string, file: File): Promise<ImagePasteOutcome> {
+  if (pendingImagePaste) return Promise.resolve("busy");
+  if (!isTerminalImageMime(file.type) || file.size === 0) return Promise.resolve("invalid");
+  if (file.size > MAX_TERMINAL_IMAGE_BYTES) return Promise.resolve("too-large");
+  const ws = state.socket;
+  if (!wisptermPeerConnected || ws?.readyState !== WebSocket.OPEN) return Promise.resolve("offline");
+  const surface = currentTab()?.surfaces.find((entry) => entry.id === surfaceId);
+  if (!surface?.imagePaste || surface.readOnly) return Promise.resolve("unsupported");
+  const leaseId = inputLeaseId(surfaceId);
+  if (leaseId === undefined || document.visibilityState !== "visible") return Promise.resolve("denied");
+
+  const requestId = createRequestId();
+  return new Promise((finish) => {
+    const timer = setTimeout(() => finishImagePaste("timeout"), IMAGE_PASTE_TIMEOUT_MS);
+    pendingImagePaste = { requestId, timer, finish };
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (pendingImagePaste?.requestId !== requestId) return;
+      if (state.socket !== ws || ws.readyState !== WebSocket.OPEN || !wisptermPeerConnected) {
+        finishImagePaste("offline");
+        return;
+      }
+      if (inputLeaseId(surfaceId) !== leaseId || document.visibilityState !== "visible" ||
+          !currentTab()?.surfaces.some((entry) => entry.id === surfaceId)) {
+        finishImagePaste("denied");
+        return;
+      }
+      const result = reader.result;
+      if (typeof result !== "string" || !result.includes(";base64,")) {
+        finishImagePaste("invalid");
+        return;
+      }
+      const data = result.slice(result.indexOf(",") + 1);
+      try {
+        ws.send(JSON.stringify({ type: "terminal-image-paste", requestId, surfaceId, leaseId, mime: file.type, data }));
+      } catch {
+        finishImagePaste("offline");
+      }
+    };
+    reader.onerror = () => {
+      if (pendingImagePaste?.requestId === requestId) finishImagePaste("failed");
+    };
+    try {
+      reader.readAsDataURL(file);
+    } catch {
+      finishImagePaste("failed");
+    }
+  });
+}
+
+function finishImagePaste(status: ImagePasteOutcome): void {
+  const pending = pendingImagePaste;
+  if (!pending) return;
+  pendingImagePaste = null;
+  clearTimeout(pending.timer);
+  pending.finish(status);
 }
 
 export function kickReconnectIfIdle(): void {

@@ -6,6 +6,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import * as workspaceProtocol from "../../src/server/workspace_protocol.js";
 import * as terminalProtocol from "../../src/server/terminal_control_protocol.js";
+import * as imageProtocol from "../../src/server/terminal_image_protocol.js";
 
 // Exercise the actual Worker relay handlers with lightweight Cloudflare/WebSocket doubles.
 function workerSession(): { attachWispTerm(s: WorkerSocket): void; attachBrowser(s: WorkerSocket): void } {
@@ -18,6 +19,7 @@ function workerSession(): { attachWispTerm(s: WorkerSocket): void; attachBrowser
       if (name === "cloudflare:workers") return { DurableObject: class {} };
       if (name === "./server/workspace_protocol.js") return workspaceProtocol;
       if (name === "./server/terminal_control_protocol.js") return terminalProtocol;
+      if (name === "./server/terminal_image_protocol.js") return imageProtocol;
       throw new Error(`unexpected import ${name}`);
     },
   });
@@ -64,6 +66,28 @@ test("Worker stamps workspace identity and routes valid results to that browser 
   assert.equal(host.sent.length, hostCount);
 });
 
+
+test("Worker forwards image paste using its relay identity and returns the result only to the sender", () => {
+  const session = workerSession(), host = new WorkerSocket(), sender = new WorkerSocket(), observer = new WorkerSocket();
+  session.attachWispTerm(host);
+  session.attachBrowser(sender);
+  session.attachBrowser(observer);
+  const clientId = sender.messages()[0].clientId;
+  const observerClientId = observer.messages()[0].clientId;
+  const image = {
+    type: "terminal-image-paste", requestId: "image_worker", surfaceId: "0000000000000001",
+    leaseId: 4, mime: "image/png", data: "iVBORw0KGgo=",
+  };
+  sender.receive({ ...image, leaseId: null });
+  assert.equal(host.sent.length, 0);
+  sender.receive({ ...image, clientId: observerClientId });
+  assert.deepEqual(host.messages().at(-1), { ...image, clientId });
+  const beforeObserver = observer.sent.length;
+  const result = { type: "terminal-image-paste-result", requestId: image.requestId, status: "denied" };
+  host.receive({ ...result, clientId });
+  assert.deepEqual(sender.messages().at(-1), result);
+  assert.equal(observer.sent.length, beforeObserver);
+});
 
 test("Worker forwards workspace rename without a lease and broadcasts the authoritative title", () => {
   const session = workerSession(), host = new WorkerSocket(), browser = new WorkerSocket(), other = new WorkerSocket();

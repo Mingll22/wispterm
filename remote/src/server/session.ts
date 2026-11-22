@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { WebSocket } from "ws";
 import { browserWorkspaceAction, hostWorkspaceResult } from "./workspace_protocol.js";
 import { browserTabControl, hostTabControlState, browserTerminalMessage, hostTerminalMessage, type TerminalGridMessage } from "./terminal_control_protocol.js";
+import { browserTerminalImage, hostTerminalImageResult } from "./terminal_image_protocol.js";
 
 export type RelayMessage = {
   type?: string;
@@ -250,6 +251,14 @@ export class RemoteSession {
         }
         return;
       }
+      if (message.type === "terminal-image-paste-result") {
+        const result = hostTerminalImageResult(message);
+        if (result) {
+          const { clientId, ...browserResult } = result;
+          this.sendBrowser(clientId, browserResult);
+        }
+        return;
+      }
       if (message.type === "open-ai-agent-result") {
         this.handleAiAgentOpenResult(message);
         return;
@@ -321,6 +330,13 @@ export class RemoteSession {
         const action = browserWorkspaceAction(message, clientId);
         if (action && (!this.wispterm || !safeSend(this.wispterm, action))) {
           this.sendBrowser(clientId, { type: "workspace-action-result", requestId: action.requestId, status: "offline" });
+        }
+        return;
+      }
+      if (message.type === "terminal-image-paste") {
+        const image = browserTerminalImage(message, clientId);
+        if (image && (!this.wispterm || !safeSend(this.wispterm, image))) {
+          this.sendBrowser(clientId, { type: "terminal-image-paste-result", requestId: image.requestId, status: "offline" });
         }
         return;
       }

@@ -2859,6 +2859,7 @@ test "tab: snapshotTab does not use local launch cwd as ssh remote cwd" {
     @memcpy(surface.initial_cwd_path[0..6], "/local");
     surface.initial_cwd_path_len = 6;
     surface.title_override_len = 0;
+    surface.remote_terminal = .{};
     surface.setSshConnection("root", "server.test", "22", "", "", false, false);
 
     var tree = try SplitTree.init(allocator, &surface);
@@ -2899,6 +2900,7 @@ test "tab: snapshotTab persists ssh cwd only when remote cwd is known" {
     @memcpy(surface.initial_cwd_path[0..6], "/local");
     surface.initial_cwd_path_len = 6;
     surface.title_override_len = 0;
+    surface.remote_terminal = .{};
     surface.setSshConnection("root", "server.test", "22", "", "", false, false);
 
     var tree = try SplitTree.init(allocator, &surface);
