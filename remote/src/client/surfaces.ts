@@ -29,7 +29,7 @@ import { parseAiChatTranscript, type AiChatMessage } from "./ai_chat_transcript"
 import { aiChatStopControlState } from "./ai_chat_controls";
 import { isMobileRemoteShell, shouldUseCanvasPan, shouldUseViewportFit } from "./mobile_layout";
 import { mobileVisualZoomPercent, scaleVisualCanvasSize } from "./mobile_visual_zoom";
-import { setNativeTerminalInputBlocked, shouldBlockNativeTerminalInput } from "./terminal_input_guard";
+import { setNativeTerminalInputBlocked, shouldBlockNativeTerminalInput, suppressMirroredTerminalReplies } from "./terminal_input_guard";
 import { cursorMoveSequence, emptyState, validPositiveInteger } from "./utils";
 import { currentTab, inputLeaseId, resetSurfaceViews, state, tabControlId } from "./state";
 import { getTerminalPalette, subscribeToTheme } from "./theme";
@@ -55,9 +55,6 @@ const MOBILE_SCROLLBAR_MIN_THUMB_HEIGHT = 24;
 const MOBILE_SCROLLBAR_VERTICAL_INSET = 8;
 const DESKTOP_SCROLLBAR_MIN_THUMB_HEIGHT = 32;
 const DESKTOP_SCROLLBAR_VERTICAL_INSET = 10;
-// Xterm replies to color queries while replaying the host's output. The PTY's
-// owning terminal supplies these replies using its own theme.
-const DEFAULT_COLOR_REPLY = /^\x1b\](?:10|11);rgb:[0-9a-f]{4}\/[0-9a-f]{4}\/[0-9a-f]{4}\x1b\\(?![\s\S])/;
 
 type InputHandler = (surfaceId: string, data: string) => void;
 let controlMeasurementQueued = false;
@@ -159,6 +156,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     theme: getTerminalPalette(),
   });
   bindAlternateScreenResize(term);
+  suppressMirroredTerminalReplies(term);
   term.loadAddon(fit);
 
   const view: SurfaceView = {
@@ -181,7 +179,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     fit,
     decoder: new TextDecoder(),
     disposeInput: term.onData((data) => {
-      if (isViewModeInputBlocked() || DEFAULT_COLOR_REPLY.test(data)) return;
+      if (isViewModeInputBlocked()) return;
       const current = state.layoutState?.tabs
         .flatMap((tab) => tab.surfaces)
         .find((surface) => surface.id === surfaceId);
