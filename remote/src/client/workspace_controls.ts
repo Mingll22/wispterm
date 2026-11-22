@@ -17,12 +17,14 @@ type WorkspaceCallbacks = {
   controlChanged: () => void;
 };
 
-export function workspaceTabActionsMarkup(classes = ""): string {
+export function workspaceTabActionsMarkup(classes = "", controlPosition: "start" | "end" = "start"): string {
+  const control = `<button type="button" class="icon-button tab-control-toggle" hidden>${iconTabControl(false)}</button>`;
+  const actions = `
+    <button type="button" class="icon-button tab-add-pane" hidden>${iconAdd()}</button>
+    <button type="button" class="icon-button tab-delete" hidden>${iconDelete()}</button>`;
   return `
     <div class="workspace-tab-actions${classes}" role="group" aria-label="${tr("Selected tab actions", "当前标签操作")}" hidden>
-      <button type="button" class="icon-button tab-control-toggle" hidden>${iconTabControl(false)}</button>
-      <button type="button" class="icon-button tab-add-pane" hidden>${iconAdd()}</button>
-      <button type="button" class="icon-button tab-delete" hidden>${iconDelete()}</button>
+      ${controlPosition === "end" ? actions + control : control + actions}
     </div>`;
 }
 
@@ -156,7 +158,7 @@ export function bindWorkspaceControls(root: HTMLElement, callbacks: WorkspaceCal
     row.innerHTML = `
       <button type="button" class="tab-chip"><span class="tab-chip-label"></span></button>
       <input type="text" class="tab-title-input" aria-label="${tr("Tab name", "标签名称")}" autocomplete="off" spellcheck="false" hidden>
-      ${workspaceTabActionsMarkup()}
+      ${workspaceTabActionsMarkup("", "end")}
       <span class="tab-chip-count" aria-hidden="true"></span>`;
     const button = row.querySelector<HTMLButtonElement>(".tab-chip")!;
     const editor = row.querySelector<HTMLInputElement>(".tab-title-input")!;
