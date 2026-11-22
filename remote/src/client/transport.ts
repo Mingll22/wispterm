@@ -1,7 +1,8 @@
 import { tr } from "./i18n";
-import type { ConnectionStatus, MeResponse, RelayMessage } from "./types";
+import type { ConnectionStatus, LayoutTab, MeResponse, RelayMessage } from "./types";
 import { isWorkspaceId, type WorkspaceAction, type WorkspaceResult } from "../workspace_protocol";
-import { state, currentTab } from "./state";
+import type { TabControlRequest } from "../tab_control_protocol";
+import { state, currentTab, inputLeaseId, tabControlId } from "./state";
 import { isLayoutMessage, normalizeLayout, resolveLayoutSelection } from "./layout";
 import { decodeHex, encodeHex, safeJson, validPositiveInteger } from "./utils";
 import { saveSessionKey } from "./storage";
@@ -10,7 +11,9 @@ import {
   setTerminalControlSender,
   terminalControl,
   TERMINAL_LEASE_RENEW_INTERVAL_MS,
+  type TerminalControlRequest,
 } from "./terminal_control";
+import { setTabControlSender, tabControl } from "./tab_control";
 import {
   connectionStatusConnecting,
   connectionStatusForLatency,
@@ -34,7 +37,7 @@ const RECONNECT_MIN_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
 const WORKSPACE_ACTION_TIMEOUT_MS = 10_000;
 
-type ActionBody<T> = T extends WorkspaceAction ? Omit<T, "type" | "requestId"> : never;
+type ActionBody<T> = T extends WorkspaceAction ? Omit<T, "type" | "requestId" | "leaseId"> : never;
 export type WorkspaceCommand = ActionBody<WorkspaceAction>;
 export type WorkspaceActionStatus = WorkspaceResult["status"] | "timeout";
 
@@ -77,7 +80,7 @@ let pendingWorkspaceAction: {
   created?: { tabId: string; surfaceId: string };
 } | null = null;
 
-setTerminalControlSender((request) => {
+function sendControlRequest(request: TerminalControlRequest | TabControlRequest): boolean {
   const ws = state.socket;
   if (!wisptermPeerConnected || ws?.readyState !== WebSocket.OPEN) return false;
   try {
@@ -86,7 +89,9 @@ setTerminalControlSender((request) => {
   } catch {
     return false;
   }
-});
+}
+setTerminalControlSender(sendControlRequest);
+setTabControlSender(sendControlRequest);
 
 export function api(path: string, init?: RequestInit): Promise<Response> {
   return fetch(path, {
@@ -111,8 +116,8 @@ export function connect(sessionKey: string): void {
   state.activeSessionKey = sessionKey;
   cancelReconnect();
   stopHeartbeat();
-  terminalControl.releaseAll();
-  terminalControl.connect(null);
+  releaseRemoteControl();
+  connectRemoteControl(null);
   state.socket?.close();
   finishWorkspaceAction("offline");
   disposeSurfaceViews();
@@ -144,7 +149,7 @@ export function connect(sessionKey: string): void {
     stopHeartbeat();
     state.socket = null;
     finishWorkspaceAction("offline");
-    terminalControl.connect(null);
+    connectRemoteControl(null);
     resetConnectionHealth();
     if (state.activeSessionKey === sessionKey) {
       scheduleReconnect();
@@ -174,7 +179,7 @@ export function connect(sessionKey: string): void {
     }
 
     if (message.type === "terminal-control-client" && typeof message.clientId === "string") {
-      terminalControl.connect(message.clientId);
+      connectRemoteControl(message.clientId);
       hooks.onInputUiChanged();
       return;
     }
@@ -193,6 +198,20 @@ export function connect(sessionKey: string): void {
       return;
     }
 
+    if (message.type === "tab-control-state" &&
+        isWorkspaceId(message.tabId) &&
+        (message.clientId === null || typeof message.clientId === "string") &&
+        isTerminalControlReason(message.reason)) {
+      if (tabControl.receive({
+        type: message.type, tabId: message.tabId, clientId: message.clientId,
+        leaseId: validPositiveInteger(message.leaseId), reason: message.reason,
+      }, document.visibilityState === "visible")) {
+        hooks.onInputUiChanged();
+        if (message.reason === "expired") refitAllSurfaces();
+      }
+      return;
+    }
+
     if (message.type === "terminal-grid" && typeof message.surfaceId === "string") {
       const cols = validPositiveInteger(message.cols);
       const rows = validPositiveInteger(message.rows);
@@ -204,6 +223,7 @@ export function connect(sessionKey: string): void {
       wisptermPeerConnected = message.wisptermConnected === true;
       if (!wisptermPeerConnected) {
         terminalControl.setDesktopReady(false);
+        tabControl.setDesktopReady(false);
         finishWorkspaceAction("offline");
       }
       updateConnectionStatus();
@@ -221,6 +241,7 @@ export function connect(sessionKey: string): void {
       terminalControl.setDesktopReady(true);
       const previousTab = state.hasSeenLayout ? currentTab() : null;
       state.layoutState = normalizeLayout(message);
+      tabControl.setDesktopReady(state.layoutState.tabControl === true);
       const selection = resolveLayoutSelection(state.layoutState, previousTab, state.selectedSurfaceId);
       state.hasSeenLayout = true;
       state.selectedTabIndex = selection.tabIndex;
@@ -251,8 +272,8 @@ export function disconnect(): void {
   cancelReconnect();
   stopHeartbeat();
   reconnectAttempts = 0;
-  terminalControl.releaseAll();
-  terminalControl.connect(null);
+  releaseRemoteControl();
+  connectRemoteControl(null);
   finishWorkspaceAction("offline");
   if (state.socket) {
     try { state.socket.close(); } catch { /* ignore */ }
@@ -262,16 +283,36 @@ export function disconnect(): void {
   hooks.setStatus(connectionStatusOffline());
 }
 
-export function workspaceActionAvailable(): boolean {
+export function releaseRemoteControl(): void {
+  terminalControl.reconcile([], false);
+  tabControl.reconcile(null, [], [], false);
+}
+
+function connectRemoteControl(clientId: string | null): void {
+  terminalControl.connect(clientId);
+  tabControl.connect(clientId);
+}
+
+export function workspaceActionAvailable(tab?: LayoutTab): boolean {
+  const controlId = tab && tabControlId(tab);
   return wisptermPeerConnected === true && state.socket?.readyState === WebSocket.OPEN &&
-    state.layoutState?.workspaceActions === true && pendingWorkspaceAction === null;
+    state.layoutState?.workspaceActions === true && pendingWorkspaceAction === null &&
+    (!controlId || tabControl.leaseId(controlId) !== undefined);
 }
 
 export function sendWorkspaceAction(command: WorkspaceCommand): Promise<WorkspaceActionStatus> {
   const socket = state.socket;
   if (!socket || !workspaceActionAvailable()) return Promise.resolve("offline");
   const requestId = Array.from(crypto.getRandomValues(new Uint32Array(4)), (word) => word.toString(16).padStart(8, "0")).join("");
-  const request: WorkspaceAction = { type: "workspace-action", requestId, ...command };
+  const leaseId = command.action !== "create-tab" && state.layoutState?.tabControl
+    ? tabControl.leaseId(command.tabId)
+    : undefined;
+  if (command.action !== "create-tab" && state.layoutState?.tabControl && leaseId === undefined) {
+    return Promise.resolve("denied");
+  }
+  const request: WorkspaceAction = {
+    type: "workspace-action", requestId, ...command, ...(leaseId === undefined ? {} : { leaseId }),
+  };
   return new Promise((finish) => {
     const timer = setTimeout(() => finishWorkspaceAction("timeout"), WORKSPACE_ACTION_TIMEOUT_MS);
     pendingWorkspaceAction = { request, timer, finish };
@@ -310,6 +351,7 @@ function receiveWorkspaceActionResult(message: RelayMessage): void {
     case "stale":
     case "unsupported":
     case "protected":
+    case "denied":
     case "limit":
     case "failed":
     case "offline":
@@ -331,10 +373,12 @@ function selectCreatedWorkspacePane(): boolean {
 export function sendInputBytes(surfaceId: string, data: string): void {
   const ws = state.socket;
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const surface = state.layoutState?.tabs.flatMap((tab) => tab.surfaces).find((entry) => entry.id === surfaceId);
+  const tab = state.layoutState?.tabs.find((entry) => entry.surfaces.some((surface) => surface.id === surfaceId));
+  const surface = tab?.surfaces.find((entry) => entry.id === surfaceId);
   if (!surface || surface.readOnly) return;
-  const leaseId = terminalControl.leaseId(surfaceId);
-  if (surface.terminalControl && (leaseId === undefined || document.visibilityState !== "visible")) return;
+  const leaseId = inputLeaseId(surfaceId, tab);
+  if ((surface.terminalControl || tabControlId(tab)) &&
+      (leaseId === undefined || document.visibilityState !== "visible")) return;
   ws.send(
     JSON.stringify({
       type: "input-bytes",
@@ -364,7 +408,9 @@ function startHeartbeat(ws: WebSocket): void {
     sendHeartbeatPing(ws);
   }, HEARTBEAT_INTERVAL_MS);
   leaseTimer = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN && document.visibilityState === "visible") terminalControl.renew();
+    if (ws.readyState !== WebSocket.OPEN || document.visibilityState !== "visible") return;
+    terminalControl.renew();
+    tabControl.renew();
   }, TERMINAL_LEASE_RENEW_INTERVAL_MS);
   watchdogTimer = setInterval(() => {
     if (ws.readyState !== WebSocket.OPEN) return;
@@ -455,4 +501,5 @@ function resetConnectionHealth(): void {
   lastLatencyMs = null;
   wisptermPeerConnected = null;
   terminalControl.setDesktopReady(false);
+  tabControl.setDesktopReady(false);
 }

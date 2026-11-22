@@ -10,6 +10,7 @@ const appwindow_state = @import("state.zig");
 const active_tab_state = @import("active_tab.zig");
 const remote = @import("../remote_hub.zig");
 const remote_snapshot = @import("../remote_snapshot.zig");
+const remote_control = @import("../remote_terminal_control.zig");
 const remote_workspace = @import("../remote_workspace.zig");
 const renderer = @import("../renderer.zig");
 const surface_snapshots = @import("surface_snapshots.zig");
@@ -63,16 +64,58 @@ pub fn syncPendingLayout(host: Host, allocator: std.mem.Allocator) void {
     if (host.state.remote.layout_pending or hub.layoutNeedsGridRefresh()) syncLayout(host, allocator);
 }
 
-pub fn handleWorkspaceActions(host: Host, apply: *const fn (remote_workspace.Request) remote_workspace.Result) void {
+pub fn expireTabControls(host: Host) ?i64 {
+    const hub = host.hub orelse return null;
+    const now = std.time.Instant.now() catch return null;
+    var next_deadline: ?i64 = null;
+    for (tab.g_tabs[0..tab.g_tab_count]) |maybe_tab| {
+        const state = maybe_tab orelse continue;
+        const id = state.workspace_id orelse continue;
+        const remaining_ns = state.remote_tab_control.expire(&state.tree, hub, id, now) orelse continue;
+        const remaining_ms: i64 = @intCast((remaining_ns + std.time.ns_per_ms - 1) / std.time.ns_per_ms);
+        next_deadline = @min(next_deadline orelse remaining_ms, remaining_ms);
+    }
+    return next_deadline;
+}
+
+pub fn handleWorkspaceRequests(
+    host: Host,
+    can_mutate: bool,
+    apply: *const fn (remote_workspace.Request) remote_workspace.Result,
+) void {
     const hub = host.hub orelse return;
     const window = host.workspace_window orelse return;
-    for (0..remote.max_workspace_actions) |_| {
-        const request = hub.takeWorkspaceAction(window) orelse return;
+    for (0..remote.max_workspace_requests) |_| {
+        const request = hub.takeWorkspaceRequest(window) orelse return;
         defer request.deinit();
-        const result = apply(request.value);
-        hub.sendWorkspaceActionResult(request.value, result);
-        if (result.status == .ok or result.status == .stale) host.state.remote.forceNextLayout();
+        switch (request) {
+            .action => |parsed| {
+                const result = apply(parsed.value);
+                hub.sendWorkspaceActionResult(parsed.value, result);
+                if (result.status == .ok or result.status == .stale) host.state.remote.forceNextLayout();
+            },
+            .control => |parsed| handleTabControl(hub, parsed.value, can_mutate),
+        }
     }
+    // A producer can fill the bounded queue again while this window drains it.
+    window_backend.postWakeup();
+}
+
+fn handleTabControl(hub: *remote.Hub, request: remote_control.TabRequest, can_mutate: bool) void {
+    const target = workspace_actions.findTab(request.tabId) orelse {
+        hub.sendTabControlState(request.tabId, null, .unsupported);
+        return;
+    };
+    const state = target.state;
+    if (!state.supportsRemoteWorkspace()) {
+        hub.sendTabControlState(request.tabId, null, .unsupported);
+        return;
+    }
+    if (!can_mutate and (request.action == .acquire or request.action == .takeover)) {
+        hub.sendTabControlState(request.tabId, if (state.remote_tab_control.lease.grant) |*grant| grant else null, .denied);
+        return;
+    }
+    state.remote_tab_control.request(&state.tree, hub, request);
 }
 
 pub fn buildLayoutJson(host: Host, allocator: std.mem.Allocator) ![]u8 {
@@ -85,7 +128,7 @@ pub fn buildLayoutJson(host: Host, allocator: std.mem.Allocator) ![]u8 {
 fn appendLayoutJson(host: Host, allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
     try out.appendSlice(allocator, "{\"type\":\"layout\",\"activeTab\":");
     try out.print(allocator, "{d}", .{active_tab_state.g_active_tab});
-    if (host.workspace_window != null) try out.appendSlice(allocator, ",\"workspaceActions\":true");
+    if (host.workspace_window != null) try out.appendSlice(allocator, ",\"workspaceActions\":true,\"tabControl\":true");
     try out.appendSlice(allocator, ",\"tabs\":[");
 
     var wrote_tab = false;

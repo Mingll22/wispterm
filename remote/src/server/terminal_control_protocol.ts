@@ -1,5 +1,16 @@
 // Relay validation only. Lease ownership and expiration belong to the desktop.
+import { isWorkspaceId, validLeaseId } from "./workspace_protocol.js";
+
 type Message = Record<string, unknown>;
+export type TabControlGrid = { surfaceId: string; cols: number; rows: number };
+export type TabControlReason = "acquired" | "taken" | "released" | "expired" | "desktop" | "denied" | "unsupported";
+export type TabControlRequest =
+  | { type: "tab-control"; tabId: string; action: "acquire" | "takeover" }
+  | { type: "tab-control"; tabId: string; action: "renew" | "release"; leaseId: number }
+  | { type: "tab-control"; tabId: string; action: "resize"; leaseId: number; grids: TabControlGrid[] };
+export type TabControlState = {
+  type: "tab-control-state"; tabId: string; clientId: string | null; leaseId: number | null; reason: TabControlReason;
+};
 export type TerminalGridMessage = { type: "terminal-grid"; surfaceId: string; cols: number; rows: number };
 type TerminalControlStateMessage = {
   type: "terminal-control-state";
@@ -15,10 +26,6 @@ function record(value: unknown): value is Message {
 
 function surfaceId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
-}
-
-export function validLeaseId(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 0xffffffff;
 }
 
 function validGrid(cols: unknown, rows: unknown): cols is number {
@@ -52,6 +59,31 @@ function validHostGridDimension(value: unknown): value is number {
 }
 
 const reasons = new Set(["acquired", "taken", "released", "expired", "desktop", "denied", "unsupported"]);
+
+export function browserTabControl(value: unknown, clientId: string): (TabControlRequest & { clientId: string }) | null {
+  if (!record(value) || value.type !== "tab-control" || !isWorkspaceId(value.tabId)) return null;
+  const base = { type: "tab-control" as const, tabId: value.tabId, clientId };
+  if (value.action === "acquire" || value.action === "takeover") return { ...base, action: value.action };
+  if (!validLeaseId(value.leaseId)) return null;
+  if (value.action === "renew" || value.action === "release") return { ...base, action: value.action, leaseId: value.leaseId };
+  if (value.action !== "resize" || !Array.isArray(value.grids) || value.grids.length < 1 || value.grids.length > 16) return null;
+  const ids = new Set<string>();
+  const grids: TabControlGrid[] = [];
+  for (const grid of value.grids) {
+    if (!record(grid) || !isWorkspaceId(grid.surfaceId) || ids.has(grid.surfaceId) || !validGrid(grid.cols, grid.rows)) return null;
+    ids.add(grid.surfaceId);
+    grids.push({ surfaceId: grid.surfaceId, cols: grid.cols, rows: grid.rows as number });
+  }
+  return { ...base, action: "resize", leaseId: value.leaseId, grids };
+}
+
+export function hostTabControlState(value: unknown): TabControlState | null {
+  if (!record(value) || value.type !== "tab-control-state" || !isWorkspaceId(value.tabId) ||
+      !(value.clientId === null || (typeof value.clientId === "string" && value.clientId.length > 0)) ||
+      !(value.leaseId === null || validLeaseId(value.leaseId)) ||
+      typeof value.reason !== "string" || !reasons.has(value.reason)) return null;
+  return { type: value.type, tabId: value.tabId, clientId: value.clientId, leaseId: value.leaseId, reason: value.reason as TabControlReason };
+}
 
 export function hostTerminalMessage(value: unknown): TerminalGridMessage | TerminalControlStateMessage | null {
   if (!record(value) || !surfaceId(value.surfaceId)) return null;

@@ -60,9 +60,8 @@ pub fn buildRemoteSurfaceSnapshot(allocator: std.mem.Allocator, surface: *Surfac
     );
 }
 
-/// Web-console snapshot: plain text plus the host VT's mode state so the
-/// remote xterm mirrors desktop input behavior (issue #502). Text-only
-/// consumers keep using buildRemoteSurfaceSnapshot.
+/// Web-console replay preserves the host VT's cell styles and input modes.
+/// Text consumers use buildRemoteSurfaceSnapshot.
 pub fn buildRemoteSurfaceSnapshotWithModes(allocator: std.mem.Allocator, surface: *Surface, max_history_rows: usize) ![]u8 {
     surface.render_state.mutex.lock();
     defer surface.render_state.mutex.unlock();

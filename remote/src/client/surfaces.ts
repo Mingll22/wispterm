@@ -31,11 +31,12 @@ import { isMobileRemoteShell, shouldUseCanvasPan, shouldUseViewportFit } from ".
 import { mobileVisualZoomPercent, scaleVisualCanvasSize } from "./mobile_visual_zoom";
 import { setNativeTerminalInputBlocked, shouldBlockNativeTerminalInput } from "./terminal_input_guard";
 import { cursorMoveSequence, emptyState, validPositiveInteger } from "./utils";
-import { currentTab, resetSurfaceViews, state } from "./state";
+import { currentTab, inputLeaseId, resetSurfaceViews, state, tabControlId } from "./state";
 import { getTerminalPalette, subscribeToTheme } from "./theme";
 import { REMOTE_TERMINAL_SCROLLBACK } from "./terminal_options";
 import { mapScaledTerminalPointer } from "./terminal_pointer";
 import { supportedTerminalGrid, terminalControl, type TerminalControlTarget } from "./terminal_control";
+import { tabControl } from "./tab_control";
 import { workspaceGeometry } from "./workspace_layout";
 import { positionWorkspacePane } from "./workspace_panels";
 import {
@@ -53,6 +54,9 @@ const MOBILE_SCROLLBAR_MIN_THUMB_HEIGHT = 24;
 const MOBILE_SCROLLBAR_VERTICAL_INSET = 8;
 const DESKTOP_SCROLLBAR_MIN_THUMB_HEIGHT = 32;
 const DESKTOP_SCROLLBAR_VERTICAL_INSET = 10;
+// Xterm replies to color queries while replaying the host's output. The PTY's
+// owning terminal supplies these replies using its own theme.
+const DEFAULT_COLOR_REPLY = /^\x1b\](?:10|11);rgb:[0-9a-f]{4}\/[0-9a-f]{4}\/[0-9a-f]{4}\x1b\\(?![\s\S])/;
 
 type InputHandler = (surfaceId: string, data: string) => void;
 let controlMeasurementQueued = false;
@@ -128,6 +132,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
   panel.appendChild(mount);
 
   const selectThis = (): void => {
+    if (state.selectedSurfaceId === surfaceId) return;
     state.selectedSurfaceId = surfaceId;
     renderRemotePanels();
   };
@@ -172,7 +177,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     fit,
     decoder: new TextDecoder(),
     disposeInput: term.onData((data) => {
-      if (isViewModeInputBlocked()) return;
+      if (isViewModeInputBlocked() || DEFAULT_COLOR_REPLY.test(data)) return;
       const current = state.layoutState?.tabs
         .flatMap((tab) => tab.surfaces)
         .find((surface) => surface.id === surfaceId);
@@ -200,7 +205,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     remoteRows: null,
   };
   view.disposeMiddleClickGesture = bindTwoFingerMiddleClick(view);
-  view.disposeCanvasPan = bindCanvasPan(view);
+  view.disposeCanvasPan = bindCanvasPan(view, selectThis);
   state.surfaceViews.set(surfaceId, view);
   return view;
 }
@@ -212,6 +217,7 @@ export function renderRemotePanels(): void {
 
   const tab = currentTab();
   const paneMode = isMobileRemoteShell() ? state.mobilePanelMode : state.desktopPanelMode;
+  panelsRoot.toggleAttribute("data-mirrored", paneMode === "layout" && (tab?.surfaces.length ?? 0) > 1);
   const selectedSurface = tab?.surfaces.find((surface) => surface.id === state.selectedSurfaceId) ?? tab?.surfaces[0];
   const workspace = panelsRoot.closest(".workspace");
   const titleInPane = Boolean(selectedSurface && (tab?.workspace || (selectedSurface.terminalControl && !selectedSurface.readOnly)));
@@ -421,14 +427,18 @@ function scheduleControlMeasurement(): void {
   requestAnimationFrame(() => {
     controlMeasurementQueued = false;
     if (document.getElementById("remote-panels")?.hasAttribute("data-split-preview")) return;
+    const tab = currentTab();
+    const groupId = tabControlId(tab);
+    const foreground = document.visibilityState === "visible";
     const targets: TerminalControlTarget[] = [];
-    for (const surface of currentTab()?.surfaces ?? []) {
-      if (!surface.terminalControl || surface.readOnly) continue;
+    for (const surface of tab?.surfaces ?? []) {
+      if (surface.readOnly || (!groupId && !surface.terminalControl)) continue;
       const view = state.surfaceViews.get(surface.id);
       if (!view?.opened || !view.host.isConnected || !view.host.clientWidth || !view.host.clientHeight) continue;
       targets.push({ surfaceId: surface.id, grid: measureControlGrid(view) });
     }
-    terminalControl.reconcile(targets, document.visibilityState === "visible");
+    terminalControl.reconcile(groupId ? [] : targets, foreground);
+    tabControl.reconcile(groupId ?? null, tab?.surfaces.map(({ id }) => id) ?? [], targets, foreground);
   });
 }
 
@@ -450,10 +460,9 @@ function measureControlGrid(view: SurfaceView): TerminalControlTarget["grid"] {
 }
 
 export function updateSurfaceCursors(): void {
+  const tab = currentTab();
   for (const [surfaceId, view] of state.surfaceViews) {
-    const surface = state.layoutState?.tabs
-      .flatMap((tab) => tab.surfaces)
-      .find((candidate) => candidate.id === surfaceId);
+    const surface = tab?.surfaces.find((candidate) => candidate.id === surfaceId);
     applySurfaceInputPolicy(view, surface);
     updateSurfaceCursor(view, surfaceId);
   }
@@ -645,15 +654,19 @@ function updateSurfaceCursor(view: SurfaceView, surfaceId: string): void {
 }
 
 function applySurfaceInputPolicy(view: SurfaceView, surface: LayoutSurface | undefined): void {
+  const groupControlled = Boolean(tabControlId() && surface && !surface.readOnly);
   const supportsLease = surface?.terminalControl === true && surface.readOnly !== true;
-  const held = surface !== undefined && terminalControl.leaseId(surface.id) !== undefined;
-  view.term.options.disableStdin =
-    surface?.kind === "ai_chat" || surface?.readOnly === true || (supportsLease && !held) || isViewModeInputBlocked();
-  syncTerminalNativeInputGuard(view);
+  const held = surface !== undefined && inputLeaseId(surface.id) !== undefined;
+  const blocked =
+    !surface || surface.kind === "ai_chat" || surface.readOnly === true ||
+    ((supportsLease || groupControlled) && !held) || isViewModeInputBlocked();
+  // Restore the guard's saved attributes before xterm updates its own readonly state.
+  setNativeTerminalInputBlocked(view.host, blocked, document.activeElement);
+  view.term.options.disableStdin = blocked;
 
-  const showHeader = supportsLease || !view.paneCloseButton.hidden;
+  const showHeader = Boolean(surface && (supportsLease || groupControlled || !view.paneCloseButton.hidden));
   view.control.hidden = !showHeader;
-  view.controlButton.hidden = !supportsLease;
+  view.controlButton.hidden = !supportsLease || groupControlled;
   view.mount.toggleAttribute("data-terminal-lease", showHeader);
   if (!showHeader || !surface) return;
   const title = surface.title?.trim() || tr("Terminal", "终端");
@@ -667,7 +680,7 @@ function applySurfaceInputPolicy(view: SurfaceView, surface: LayoutSurface | und
     view.paneDragHandle.title = move;
     view.paneDragHandle.setAttribute("aria-label", move);
   }
-  if (!supportsLease) return;
+  if (view.controlButton.hidden) return;
   const reason = terminalControl.reason(surface.id);
   const connected = terminalControl.isAvailable();
   const action = held ? tr("Release", "归还") : tr("Take control", "接管");
@@ -820,14 +833,17 @@ function bufferLiveOutput(view: SurfaceView, text: string): void {
   if (lastDroppedGrid && typeof writes[0] === "string") writes.unshift(lastDroppedGrid);
 }
 
-function bindCanvasPan(view: SurfaceView): () => void {
+function bindCanvasPan(view: SurfaceView, select: () => void): () => void {
   const mount = view.mount;
   const scrollbar = view.scrollbar;
   const scrollbarThumb = view.scrollbarThumb;
   let activePointerId: number | null = null;
   let startClient: CanvasPoint = { x: 0, y: 0 };
   let startPan: CanvasPoint = { x: 0, y: 0 };
-  let lastHistoryClientY = 0;
+  let touchLikeDrag = false;
+  let historyDrag: boolean | null = null;
+  let historyClientY = 0;
+  let wheelRemainder = 0;
   let dragged = false;
   let suppressClick = false;
   let suppressClickButton: number | null = null;
@@ -836,27 +852,31 @@ function bindCanvasPan(view: SurfaceView): () => void {
   let pointerCaptureDeferred = false;
 
   const onPointerDown = (event: PointerEvent): void => {
+    const mobile = isMobileRemoteShell();
+    const touch = event.pointerType === "touch";
     const dragInput = {
-      mobile: isMobileRemoteShell(),
+      mobile,
+      touch,
       isPrimary: event.isPrimary,
       button: event.button,
-      nativeSelection: state.mobileInputMode === "view",
+      nativeSelection: !mobile || state.mobileInputMode === "view",
     };
     if (
       !shouldStartCanvasPanDrag(dragInput)
     ) return;
-    const mobile = isMobileRemoteShell();
     updateCanvasPan(view);
     const viewport = canvasViewportSize(view);
     const canvas = canvasContentSize(view);
-    const hasScrollableHistory = mobile && view.term.buffer.active.baseY > 0;
+    touchLikeDrag = mobile || touch;
+    const hasScrollableHistory = touchLikeDrag && view.term.buffer.active.baseY > 0;
     if (canvas.width <= viewport.width && canvas.height <= viewport.height && !hasScrollableHistory) return;
 
     pointerCaptureDeferred = shouldDeferCanvasPanPointerDownDefault(dragInput);
     if (!pointerCaptureDeferred) event.preventDefault();
     activePointerId = event.pointerId;
     startClient = { x: event.clientX, y: event.clientY };
-    lastHistoryClientY = event.clientY;
+    historyClientY = event.clientY;
+    historyDrag = null;
     startPan = view.canvasPan;
     dragged = false;
     if (!pointerCaptureDeferred) captureCanvasPointer(event.pointerId);
@@ -870,27 +890,18 @@ function bindCanvasPan(view: SurfaceView): () => void {
       pointerCaptureDeferred = false;
       captureCanvasPointer(event.pointerId);
     }
-    if (isMobileRemoteShell() && Math.abs(delta.y) >= Math.abs(delta.x)) {
-      const historyLines = touchHistoryScrollLines(event.clientY - lastHistoryClientY, terminalRowHeight(view));
-      if (
-        historyLines !== 0 &&
-        terminalCanScrollHistory({
-          baseY: view.term.buffer.active.baseY,
-          viewportY: view.term.buffer.active.viewportY,
-          deltaY: historyLines,
-        })
-      ) {
-        dragged = true;
-        event.preventDefault();
-        view.term.scrollLines(historyLines);
-        lastHistoryClientY = event.clientY;
-        startClient = { x: event.clientX, y: event.clientY };
-        startPan = view.canvasPan;
-        return;
-      }
-    }
+    historyDrag ??= touchLikeDrag && Math.abs(delta.y) >= Math.abs(delta.x) && view.term.buffer.active.baseY > 0;
     dragged = true;
     event.preventDefault();
+    if (historyDrag) {
+      const rowHeight = Math.max(1, Math.floor(terminalRowHeight(view)));
+      const historyLines = touchHistoryScrollLines(event.clientY - historyClientY, rowHeight);
+      if (historyLines !== 0) {
+        view.term.scrollLines(historyLines);
+        historyClientY -= historyLines * rowHeight;
+      }
+      return;
+    }
     const viewport = canvasViewportSize(view);
     const canvas = canvasContentSize(view);
     if (canvas.width <= viewport.width && canvas.height <= viewport.height) return;
@@ -900,14 +911,33 @@ function bindCanvasPan(view: SurfaceView): () => void {
   };
 
   const onWheel = (event: WheelEvent): void => {
+    if (!(event.target instanceof Node) || !view.host.contains(event.target) || event.ctrlKey || event.metaKey) return;
     const hasRemoteGridDimensions = view.remoteCols !== null && view.remoteRows !== null;
     const mobile = isMobileRemoteShell();
     const useCanvasPan = shouldUseCanvasPan(hasRemoteGridDimensions);
-    const canScrollHistory = terminalCanScrollHistory({
-      baseY: view.term.buffer.active.baseY,
-      viewportY: view.term.buffer.active.viewportY,
-      deltaY: event.deltaY,
-    });
+    const { baseY, viewportY } = view.term.buffer.active;
+    const vertical = event.deltaY !== 0 && Math.abs(event.deltaY) >= Math.abs(event.deltaX);
+    if (vertical) {
+      const wasSelected = view.panel.classList.contains("selected");
+      select();
+      if (!wasSelected && !mobile && view.opened && !view.term.options.disableStdin) view.term.focus();
+    }
+    if (view.term.modes.mouseTrackingMode !== "none" && !event.shiftKey) return;
+
+    const canScrollHistory = vertical && terminalCanScrollHistory({ baseY, viewportY, deltaY: event.deltaY });
+    if (canScrollHistory) {
+      event.preventDefault();
+      event.stopPropagation();
+      const delta = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? event.deltaY
+        : wheelDelta(event, canvasViewportSize(view)).y / terminalRowHeight(view);
+      wheelRemainder += delta;
+      const lines = Math.trunc(wheelRemainder);
+      if (lines) view.term.scrollLines(lines);
+      wheelRemainder -= lines;
+      return;
+    }
+    wheelRemainder = 0;
     if (!shouldConsumeCanvasWheel({ mobile, useCanvasPan, terminalCanScrollHistory: canScrollHistory })) return;
 
     updateCanvasPan(view);

@@ -117,7 +117,6 @@ const ai_stream_gate = @import("appwindow/ai_stream_gate.zig");
 const frame_scheduler = @import("appwindow/frame_scheduler.zig");
 const frame_latency = @import("appwindow/frame_latency.zig");
 const flush_scheduler = @import("appwindow/flush_scheduler.zig");
-const resize_throttle = @import("appwindow/resize_throttle.zig");
 const surface_snapshots = @import("appwindow/surface_snapshots.zig");
 const remote_snapshot = @import("remote_snapshot.zig");
 const remote_workspace = @import("remote_workspace.zig");
@@ -281,6 +280,7 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
 
     // Apply config from App to globals
     g_theme = app.theme;
+    Surface.setCreationThemeColors(g_theme);
     applyUiEffect(.{ .needs_rebuild = true });
     g_cursor_style = app.cursor_style;
     g_cursor_blink = app.cursor_blink;
@@ -5758,14 +5758,13 @@ fn updateCursorBlinkForRenderer(rend: *Renderer) void {
 /// the heavy paint to ~60Hz here (that loop blocks our main loop, so an
 /// un-throttled paint per event stutters the drag). One-shot resizes (DPI change,
 /// font reload) call `renderResizeFrame` directly so they always paint immediately.
-threadlocal var g_resize_throttle: resize_throttle.ResizeThrottle = .{};
-
 fn onPlatformResize(width: i32, height: i32) void {
     if (width <= 0 or height <= 0) return;
     noteRemoteTerminalWindowSize(width, height);
     const now = std.time.milliTimestamp();
-    if (!g_resize_throttle.shouldRender(now)) return;
-    g_resize_throttle.noteRendered(now);
+    const throttle = &windowState().resize_throttle;
+    if (!throttle.shouldRender(now)) return;
+    throttle.noteRendered(now);
     renderResizeFrame(width, height);
 }
 
@@ -6245,6 +6244,7 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
 
     // --- Theme, cursor, debug ---
     g_theme = cfg.resolved_theme;
+    Surface.setCreationThemeColors(g_theme);
     applyUiEffect(.{ .needs_rebuild = true });
     g_cursor_style = cfg.@"cursor-style";
     g_cursor_blink = cfg.@"cursor-style-blink";
@@ -6290,6 +6290,7 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
             var it = tb.tree.surfaces();
             while (it.next()) |entry| {
                 entry.surface.render_state.mutex.lock();
+                entry.surface.updateTerminalThemeColorsLocked(g_theme);
                 entry.surface.terminal.screens.active.cursor.cursor_style = switch (g_cursor_style) {
                     .bar => .bar,
                     .block => .block,
@@ -6624,12 +6625,16 @@ fn remoteSyncHost() remote_sync.Host {
     };
 }
 
+fn remoteWorkspaceCanMutate() bool {
+    return !g_should_close and !overlays.windowCloseConfirmVisible() and !input.workspaceGestureActive();
+}
+
 fn applyRemoteWorkspaceAction(request: remote_workspace.Request) remote_workspace.Result {
     const allocator = g_allocator orelse return .{ .status = .failed };
-    if (g_should_close or overlays.windowCloseConfirmVisible() or input.workspaceGestureActive()) return .{ .status = .stale };
     return workspace_actions.apply(.{
         .allocator = allocator,
         .grid = .{ .cols = term_cols, .rows = term_rows },
+        .can_mutate = remoteWorkspaceCanMutate(),
         .cell_width = font.cell_width,
         .cell_height = font.cell_height,
         .cursor_style = g_cursor_style,
@@ -8842,6 +8847,9 @@ fn runMainLoop(self: *AppWindow) !void {
         window_backend.setTabCount(win, tab.g_tab_count);
         window_backend.setSidebarWidth(win, @intFromFloat(titlebar.sidebarWidth()));
 
+        const remote_host = remoteSyncHost();
+        const remote_lease_wait_ms = remote_sync.expireTabControls(remote_host);
+
         // Process all queued input events (keyboard, mouse, resize)
         input.processEvents(win);
 
@@ -8904,8 +8912,7 @@ fn runMainLoop(self: *AppWindow) !void {
         const fb_height: c_int = fb.height;
         const minimized = window_backend.isMinimized(win) or fb_width <= 0 or fb_height <= 0;
         if (!minimized) noteRemoteTerminalWindowSize(fb_width, fb_height);
-        const remote_host = remoteSyncHost();
-        remote_sync.handleWorkspaceActions(remote_host, applyRemoteWorkspaceAction);
+        remote_sync.handleWorkspaceRequests(remote_host, remoteWorkspaceCanMutate(), applyRemoteWorkspaceAction);
         remote_sync.syncPendingLayout(remote_host, allocator);
         if (minimized) {
             agent_requests.failPendingUiScreenshots(error.WindowUnavailable);
@@ -8914,7 +8921,8 @@ fn runMainLoop(self: *AppWindow) !void {
                 .cursor_blink_enabled = false,
                 .ms_until_next_blink = CURSOR_BLINK_INTERVAL_MS,
             });
-            window_backend.pumpAppEvents(@as(f64, @floatFromInt(timeout_ms)) / 1000.0);
+            const wait_ms = @min(timeout_ms, remote_lease_wait_ms orelse timeout_ms);
+            window_backend.pumpAppEvents(@as(f64, @floatFromInt(wait_ms)) / 1000.0);
             continue;
         }
         syncBackendSurfaceSize(fb_width, fb_height);
@@ -8959,7 +8967,8 @@ fn runMainLoop(self: *AppWindow) !void {
                 .cursor_blink_enabled = blink.enabled,
                 .ms_until_next_blink = blink.ms_until_next,
             });
-            window_backend.pumpAppEvents(@as(f64, @floatFromInt(timeout_ms)) / 1000.0);
+            const wait_ms = @min(timeout_ms, remote_lease_wait_ms orelse timeout_ms);
+            window_backend.pumpAppEvents(@as(f64, @floatFromInt(wait_ms)) / 1000.0);
             continue;
         }
         if (blink.due) g_gate_last_blink_render = gate_now;

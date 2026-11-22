@@ -14,6 +14,7 @@ pub const PendingResize = struct {
 
 pub const State = struct {
     present_bringup_settled: bool = false,
+    resize_throttle: @import("resize_throttle.zig").ResizeThrottle = .{},
     pending_resize: PendingResize = .{},
     layout_resize_immediate: bool = false,
 

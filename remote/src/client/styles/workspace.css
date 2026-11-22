@@ -10,6 +10,7 @@
 
 .workspace-new-tab[hidden],
 .workspace-tab-actions[hidden],
+.workspace-tab-actions .tab-control-toggle[hidden],
 .terminal-lease .pane-drag-handle[hidden] {
   display: none;
 }
@@ -63,6 +64,33 @@
 
 .workspace-tab-actions .tab-delete:hover:enabled {
   color: var(--danger);
+}
+
+.collapsed-tab-actions {
+  flex-direction: column;
+  gap: 8px;
+}
+
+.collapsed-tab-actions .icon-button {
+  width: var(--workspace-header-height);
+  height: var(--workspace-header-height);
+  border: 1px solid var(--line);
+  background: var(--glass-bg);
+}
+
+.workspace-tab-actions .tab-control-toggle {
+  color: var(--accent-ink);
+  background: var(--accent);
+}
+
+.workspace-tab-actions .tab-control-toggle:hover:enabled {
+  background: var(--accent);
+  filter: brightness(0.9);
+}
+
+.workspace-tab-actions .tab-control-toggle[data-held] {
+  color: var(--text);
+  background: var(--ghost-bg-strong);
 }
 
 .workspace-tab-actions svg,
@@ -301,13 +329,30 @@
 }
 
 @media (max-width: 380px) {
-  .mobile-bar:has(#mobile-workspace-actions:not([hidden])) .mobile-theme-toggle {
+  .mobile-bar:has(.mobile-tab-actions:not([hidden])) .mobile-theme-toggle {
     display: none;
   }
 
-  .mobile-bar:has(#mobile-workspace-actions:not([hidden])) #mobile-status-pip {
-    width: 32px;
+  .mobile-bar:has(.mobile-tab-actions:not([hidden])) #mobile-status-pip {
+    width: 20px;
     gap: 0;
     font-size: 0;
+  }
+}
+
+@media (max-width: 360px) {
+  .mobile-bar:has(.mobile-tab-actions:not([hidden])),
+  .mobile-bar:has(.mobile-tab-actions:not([hidden])) .mobile-chrome-controls {
+    column-gap: 4px;
+  }
+
+  .mobile-bar .mobile-tab-actions {
+    gap: 2px;
+  }
+
+  .mobile-bar .mobile-tab-actions .icon-button {
+    width: 28px;
+    min-width: 28px;
+    height: 40px;
   }
 }

@@ -85,10 +85,6 @@ export class TerminalControl {
     terminal.reason = "released";
   }
 
-  releaseAll(): void {
-    for (const surfaceId of this.visible.keys()) this.release(surfaceId);
-  }
-
   renew(): void {
     for (const [surfaceId, terminal] of this.visible) {
       if (terminal.leaseId === undefined) continue;

@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { browserWorkspaceAction, hostWorkspaceResult } from "./server/workspace_protocol.js";
-import { browserTerminalMessage, hostTerminalMessage, type TerminalGridMessage } from "./server/terminal_control_protocol.js";
+import { browserTabControl, hostTabControlState, browserTerminalMessage, hostTerminalMessage, type TerminalGridMessage } from "./server/terminal_control_protocol.js";
 
 type Env = {
   ASSETS: Fetcher;
@@ -93,6 +93,9 @@ export class RemoteSession extends DurableObject<Env> {
           encoding: message.encoding,
           data: message.data,
         });
+      } else if (message.type === "tab-control-state") {
+        const state = hostTabControlState(message);
+        if (state) this.broadcast(state);
       } else if (message.type === "terminal-control-state" || message.type === "terminal-grid") {
         const terminalMessage = hostTerminalMessage(message);
         if (terminalMessage) {
@@ -144,7 +147,7 @@ export class RemoteSession extends DurableObject<Env> {
         }
         return;
       }
-      const terminalMessage = browserTerminalMessage(message, clientId);
+      const terminalMessage = browserTabControl(message, clientId) ?? browserTerminalMessage(message, clientId);
       if (terminalMessage && this.wispterm) this.wispterm.send(JSON.stringify(terminalMessage));
     });
 
