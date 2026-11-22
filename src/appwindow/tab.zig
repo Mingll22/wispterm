@@ -78,6 +78,11 @@ pub const TabState = struct {
     tree: SplitTree,
     focused: SplitTree.Node.Handle = .root,
     workspace_id: ?remote_workspace.Id = null,
+    title_override: [remote_workspace.max_tab_title_bytes]u8 = undefined,
+    // An explicit clear persists an empty string, so the older focused-pane
+    // title fallback cannot turn it into a named tab on the next restore.
+    title_override_len: ?usize = null,
+    title_layout_pending: bool = false,
     remote_tab_control: remote_tab.State = .{},
     ai_chat_session: ?*ai_chat.Session = null,
     ai_history_session: ?*ai_history_session.Session = null,
@@ -134,6 +139,9 @@ pub const TabState = struct {
         if (g_forced_title) |forced| {
             return forced;
         }
+        if (self.title_override_len) |len| {
+            if (len != 0) return self.title_override[0..len];
+        }
         // A tmux-backed terminal tab shows the tmux window name (if any) before
         // falling back to the focused surface's title.
         if (self.kind == .terminal and self.tmux_name_len > 0) {
@@ -171,6 +179,17 @@ pub const TabState = struct {
         }
         const surface = self.focusedSurface() orelse return "wispterm";
         return surface.getTitle();
+    }
+
+    pub fn setTitleOverride(self: *TabState, title: []const u8) bool {
+        if (!remote_workspace.validTabTitle(title)) return false;
+        if (self.title_override_len) |len| {
+            if (std.mem.eql(u8, self.title_override[0..len], title)) return true;
+        }
+        @memcpy(self.title_override[0..title.len], title);
+        self.title_override_len = title.len;
+        self.title_layout_pending = true;
+        return true;
     }
 
     /// Aggregate agent state across this tab for the titlebar badge/dot:
@@ -365,11 +384,11 @@ pub threadlocal var g_sidebar_visible: bool = true;
 
 pub threadlocal var g_tab_rename_active: bool = false;
 pub threadlocal var g_tab_rename_idx: usize = 0;
-pub threadlocal var g_tab_rename_buf: [256]u8 = undefined;
+pub threadlocal var g_tab_rename_buf: [remote_workspace.max_tab_title_bytes]u8 = undefined;
 pub threadlocal var g_tab_rename_len: usize = 0;
 pub threadlocal var g_tab_rename_cursor: usize = 0;
 pub threadlocal var g_tab_rename_select_all: bool = false;
-pub threadlocal var g_tab_rename_orig_buf: [256]u8 = undefined;
+pub threadlocal var g_tab_rename_orig_buf: [remote_workspace.max_tab_title_bytes]u8 = undefined;
 pub threadlocal var g_tab_rename_orig_len: usize = 0;
 
 // ============================================================================
@@ -389,6 +408,25 @@ pub fn activeSurface() ?*Surface {
     if (g_tab_count == 0) return null;
     const t = g_tabs[active_tab_state.g_active_tab] orelse return null;
     return t.focusedSurface();
+}
+
+/// Queue a user-initiated write to a terminal on the active desktop tab.
+pub fn queueDesktopTerminalInput(surface: *Surface, data: []const u8) Surface.QueueWriteError!void {
+    if (data.len == 0) return;
+    surface.queuePtyWrite(data) catch |err| {
+        if (err != error.RemoteControlActive) return err;
+        const t = activeTab() orelse return err;
+        if (t.remote_tab_control.lease.grant == null) return err;
+        var it = t.tree.surfaces();
+        while (it.next()) |entry| {
+            if (entry.surface != surface) continue;
+            _ = t.reclaimRemoteTabControl(.desktop, .coalesced);
+            // The rejected write was not enqueued. Send the same bytes under
+            // the desktop epoch after every member's old epoch was fenced.
+            return surface.queuePtyWrite(data);
+        }
+        return err;
+    };
 }
 
 pub fn activeAiChat() ?*ai_chat.Session {
@@ -1694,9 +1732,7 @@ pub fn commitTabRename() void {
                 !std.mem.eql(u8, g_tab_rename_buf[0..g_tab_rename_len], g_tab_rename_orig_buf[0..g_tab_rename_orig_len]);
             if (changed) {
                 switch (t.kind) {
-                    .terminal => if (t.focusedSurface()) |surface| {
-                        surface.setTitleOverride(g_tab_rename_buf[0..g_tab_rename_len]);
-                    },
+                    .terminal => _ = t.setTitleOverride(g_tab_rename_buf[0..g_tab_rename_len]),
                     .ai_chat => if (t.ai_chat_session) |session| {
                         session.setTitle(g_tab_rename_buf[0..g_tab_rename_len]);
                     },
@@ -1829,6 +1865,7 @@ pub fn handleRenameKey(ev: input_key.KeyEvent) void {
 pub fn handleRenameChar(codepoint: u21) void {
     var buf: [4]u8 = undefined;
     const len = std.unicode.utf8Encode(codepoint, &buf) catch return;
+    if (!remote_workspace.validTabTitle(buf[0..len])) return;
 
     if (g_tab_rename_select_all) {
         if (len > g_tab_rename_buf.len) return;
@@ -1906,7 +1943,7 @@ pub fn snapshotTab(arena: std.mem.Allocator, t: *const TabState) !session_persis
     }
 
     return session_persist.TabSnap{
-        .title_override = try snapshotFocusedTitleOverride(arena, t),
+        .title_override = try snapshotTabTitleOverride(arena, t),
         .focused_leaf = focused_leaf,
         .zoomed_leaf = zoomed_leaf,
         .tree = tree,
@@ -1915,7 +1952,10 @@ pub fn snapshotTab(arena: std.mem.Allocator, t: *const TabState) !session_persis
     };
 }
 
-fn snapshotFocusedTitleOverride(arena: std.mem.Allocator, t: *const TabState) !?[]const u8 {
+fn snapshotTabTitleOverride(arena: std.mem.Allocator, t: *const TabState) !?[]const u8 {
+    if (t.title_override_len) |len| return try arena.dupe(u8, t.title_override[0..len]);
+
+    // Keep the historical snapshot fallback for custom launch-profile labels.
     const surface = t.focusedSurface() orelse return null;
     if (surface.title_override_len == 0) return null;
     return try arena.dupe(u8, surface.title_override[0..surface.title_override_len]);
@@ -2286,9 +2326,7 @@ pub fn restoreTab(
 fn applyRestoredTabMetadata(t: *TabState, snap: *const session_persist.TabSnap) void {
     const title = snap.title_override orelse return;
     switch (t.kind) {
-        .terminal => if (t.focusedSurface()) |surface| {
-            surface.setTitleOverride(title);
-        },
+        .terminal => _ = t.setTitleOverride(title),
         .ai_chat => if (t.ai_chat_session) |session| {
             session.setTitle(title);
         },
@@ -2733,7 +2771,7 @@ test "tab: copilot visibility is scoped to the active terminal tab" {
     try std.testing.expect(first.right_dock.showing(.copilot));
 }
 
-test "tab: snapshotTab persists focused surface title override" {
+test "tab: snapshot keeps legacy launch labels and explicitly cleared tab titles" {
     const allocator = std.testing.allocator;
 
     var surface: Surface = undefined;
@@ -2750,51 +2788,62 @@ test "tab: snapshotTab persists focused surface title override" {
     var tree = try SplitTree.init(allocator, &surface);
     defer tree.deinit();
 
-    const tab_state = TabState{
+    var tab_state = TabState{
         .kind = .terminal,
         .tree = tree,
-        .focused = .root,
-        .ai_chat_session = null,
-        .ai_history_session = null,
-        .copilot_session = null,
     };
 
     const snap = try snapshotTab(allocator, &tab_state);
     defer if (snap.title_override) |title| allocator.free(title);
-
     try std.testing.expectEqualStrings("GLM", snap.title_override.?);
+
+    try std.testing.expect(tab_state.setTitleOverride(""));
+    const cleared = try snapshotTab(allocator, &tab_state);
+    defer if (cleared.title_override) |title| allocator.free(title);
+    try std.testing.expectEqualStrings("", cleared.title_override.?);
 }
 
-test "tab: restored title override applies to focused surface" {
+test "tab: restored tab title stays stable across panes without renaming them" {
     const allocator = std.testing.allocator;
-
-    var surface: Surface = undefined;
-    surface.ref_count = 1;
-    surface.ssh_connection = null;
-    surface.cwd_path_len = 0;
-    surface.initial_cwd_path_len = 0;
-    surface.title_override_len = 0;
-
-    var tree = try SplitTree.init(allocator, &surface);
-    defer tree.deinit();
-
-    var tab_state = TabState{
-        .kind = .terminal,
-        .tree = tree,
-        .focused = .root,
-        .ai_chat_session = null,
-        .ai_history_session = null,
-        .copilot_session = null,
+    var left: Surface = undefined;
+    var right: Surface = undefined;
+    for ([_]*Surface{ &left, &right }, [_][]const u8{ "left shell", "right shell" }) |surface, title| {
+        surface.ref_count = 1;
+        surface.title_override_len = 0;
+        surface.osc7_title_len = 0;
+        @memcpy(surface.window_title[0..title.len], title);
+        surface.window_title_len = title.len;
+    }
+    const nodes = [_]SplitTree.Node{
+        .{ .split = .{ .layout = .horizontal, .ratio = 0.5, .left = @enumFromInt(1), .right = @enumFromInt(2) } },
+        .{ .leaf = .{ .terminal = &left } },
+        .{ .leaf = .{ .terminal = &right } },
     };
+    var tab_state: TabState = .{
+        .tree = try SplitTree.cloneNodes(allocator, &nodes, null),
+        .focused = @enumFromInt(1),
+    };
+    defer tab_state.tree.deinit();
     const snap = session_persist.TabSnap{
         .title_override = "GLM",
         .focused_leaf = 0,
         .tree = .{ .leaf = .{ .surface = .{ .local_shell = .{} } } },
     };
-
     applyRestoredTabMetadata(&tab_state, &snap);
+    try std.testing.expectEqualStrings("GLM", tab_state.getTitle());
+    tab_state.focused = @enumFromInt(2);
+    try std.testing.expectEqualStrings("GLM", tab_state.getTitle());
+    try std.testing.expectEqualStrings("left shell", left.getTitle());
+    try std.testing.expectEqualStrings("right shell", right.getTitle());
 
-    try std.testing.expectEqualStrings("GLM", tab_state.focusedSurface().?.getTitle());
+    try std.testing.expect(tab_state.setTitleOverride("团队"));
+    const renamed = try snapshotTabTitleOverride(allocator, &tab_state);
+    defer allocator.free(renamed.?);
+    try std.testing.expectEqualStrings("团队", renamed.?);
+    try std.testing.expect(tab_state.setTitleOverride(""));
+    try std.testing.expectEqualStrings("right shell", tab_state.getTitle());
+    tab_state.focused = @enumFromInt(1);
+    try std.testing.expectEqualStrings("left shell", tab_state.getTitle());
 }
 
 test "tab: snapshotTab does not use local launch cwd as ssh remote cwd" {

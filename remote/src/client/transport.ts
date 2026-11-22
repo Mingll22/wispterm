@@ -304,11 +304,11 @@ export function sendWorkspaceAction(command: WorkspaceCommand): Promise<Workspac
   const socket = state.socket;
   if (!socket || !workspaceActionAvailable()) return Promise.resolve("offline");
   const requestId = Array.from(crypto.getRandomValues(new Uint32Array(4)), (word) => word.toString(16).padStart(8, "0")).join("");
-  const leaseId = command.action !== "create-tab" && state.layoutState?.tabControl
-    ? tabControl.leaseId(command.tabId)
-    : undefined;
-  if (command.action !== "create-tab" && state.layoutState?.tabControl && leaseId === undefined) {
-    return Promise.resolve("denied");
+  let leaseId: number | undefined;
+  if (command.action === "rename-tab" && !state.layoutState?.tabRename) return Promise.resolve("unsupported");
+  if (command.action !== "create-tab" && command.action !== "rename-tab" && state.layoutState?.tabControl) {
+    leaseId = tabControl.leaseId(command.tabId);
+    if (leaseId === undefined) return Promise.resolve("denied");
   }
   const request: WorkspaceAction = {
     type: "workspace-action", requestId, ...command, ...(leaseId === undefined ? {} : { leaseId }),

@@ -20,6 +20,19 @@
   display: none;
 }
 
+.sidebar-resizer {
+  display: none;
+  grid-area: 1 / 2;
+  justify-self: start;
+  place-items: center;
+  width: var(--workspace-inset);
+  margin-block: var(--workspace-inset);
+  z-index: 6;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+
 .sidebar {
   position: relative;
   grid-column: 1;
@@ -310,6 +323,10 @@
 }
 
 @media (min-width: 861px) and (pointer: fine), (min-width: 861px) and (pointer: none), (min-width: 1025px) {
+  .console-shell[data-sidebar-collapsed="false"] .sidebar-resizer {
+    display: grid;
+  }
+
   .console-shell {
     --pane-outline-inset: var(--pane-gutter);
   }
@@ -984,10 +1001,12 @@
   pointer-events: none;
 }
 
-.panels-stage[data-mirrored] .remote-panel.selected::before {
+.panels-stage[data-mirrored] .remote-panel[data-focused]::before {
   z-index: 2;
-  border-color: color-mix(in srgb, var(--accent) 72%, transparent);
-  box-shadow: 0 0 0 1px var(--accent-soft), 0 0 12px var(--selected-ring);
+  border-color: var(--terminal-focus);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--terminal-focus) 15%, transparent),
+    0 0 10px color-mix(in srgb, var(--terminal-focus) 36%, transparent);
 }
 
 .terminal-mount {

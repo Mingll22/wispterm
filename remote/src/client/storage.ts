@@ -4,6 +4,7 @@ import type { PanelMode, MobileVisualZoom, ThemeMode } from "./types";
 const SESSION_KEY_STORAGE_KEY = "wispterm.remote.sessionKey";
 const THEME_STORAGE_KEY = "wispterm.remote.theme";
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "wispterm.remote.sidebarCollapsed";
+const SIDEBAR_WIDTH_STORAGE_KEY = "wispterm.remote.sidebarWidth";
 const DESKTOP_PANEL_MODE_STORAGE_KEY = "wispterm.remote.desktopPanelMode";
 const MOBILE_PANEL_MODE_STORAGE_KEY = "wispterm.remote.mobilePanelMode";
 const MOBILE_VISUAL_ZOOM_STORAGE_KEY = "wispterm.remote.mobileVisualZoom";
@@ -57,6 +58,23 @@ export function saveSidebarCollapsed(collapsed: boolean): void {
     localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, collapsed ? "1" : "0");
   } catch {
     // Storage may be unavailable in restricted browser contexts.
+  }
+}
+
+export function readSavedSidebarWidth(): number | null {
+  try {
+    const width = Number(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY));
+    return Number.isInteger(width) && width > 0 ? width : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveSidebarWidth(width: number): void {
+  try {
+    localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(width));
+  } catch {
+    // The current width still works when storage is unavailable.
   }
 }
 

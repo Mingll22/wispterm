@@ -37,6 +37,7 @@
   --vkbd-bar-to: rgba(14, 14, 15, 0.98);
   --terminal-frame-bg: var(--panel);
   --terminal-frame-border: var(--line);
+  --terminal-focus: #ff9a4d;
   --shadow-panel: 0 12px 30px rgba(0, 0, 0, 0.18);
   --shadow-drawer: 24px 0 60px rgba(0, 0, 0, 0.5);
   --selected-ring: rgba(152, 152, 158, 0.56);
@@ -104,6 +105,7 @@
   --vkbd-bar-to: rgba(227, 236, 248, 0.98);
   --terminal-frame-bg: #edf2f9;
   --terminal-frame-border: rgba(60, 86, 126, 0.19);
+  --terminal-focus: #b9540e;
   --shadow-panel: 0 12px 30px rgba(28, 35, 48, 0.08);
   --shadow-drawer: 24px 0 60px rgba(28, 35, 48, 0.18);
   --selected-ring: rgba(36, 94, 196, 0.52);

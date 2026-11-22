@@ -132,15 +132,17 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
   panel.appendChild(mount);
 
   const selectThis = (): void => {
+    setTerminalFocus(surfaceId);
     if (state.selectedSurfaceId === surfaceId) return;
     state.selectedSurfaceId = surfaceId;
     renderRemotePanels();
   };
-  panel.addEventListener("pointerdown", selectThis);
-  panel.addEventListener("click", () => {
+  mount.addEventListener("pointerdown", selectThis);
+  mount.addEventListener("click", () => {
     selectThis();
     focusSurfaceView(surfaceId);
   });
+  host.addEventListener("focusin", selectThis);
 
   const fit = new FitAddon();
   const term = new Terminal({
@@ -219,6 +221,7 @@ export function renderRemotePanels(): void {
   const paneMode = isMobileRemoteShell() ? state.mobilePanelMode : state.desktopPanelMode;
   panelsRoot.toggleAttribute("data-mirrored", paneMode === "layout" && (tab?.surfaces.length ?? 0) > 1);
   const selectedSurface = tab?.surfaces.find((surface) => surface.id === state.selectedSurfaceId) ?? tab?.surfaces[0];
+  if (state.focusedSurfaceId !== selectedSurface?.id) setTerminalFocus(null);
   const workspace = panelsRoot.closest(".workspace");
   const titleInPane = Boolean(selectedSurface && (tab?.workspace || (selectedSurface.terminalControl && !selectedSurface.readOnly)));
   workspace?.toggleAttribute("data-context-title", Boolean(selectedSurface && !titleInPane));
@@ -311,7 +314,7 @@ export function renderRemotePanels(): void {
     scheduleFit(view);
 
     if (
-      surface.id === state.selectedSurfaceId &&
+      surface.id === state.focusedSurfaceId &&
       shouldFocusTerminalElement() &&
       document.activeElement &&
       view.panel.contains(document.activeElement)
@@ -333,6 +336,7 @@ export function focusAndFitSelectedSurface(): void {
   if (!id) return;
   const view = state.surfaceViews.get(id);
   if (!view) return;
+  setTerminalFocus(id);
   if (view.aiInput) {
     if (!isMobileRemoteShell()) view.aiInput.focus();
     return;
@@ -648,9 +652,26 @@ function renderAiChatMessage(message: AiChatMessage): HTMLElement {
 }
 
 function updateSurfaceCursor(view: SurfaceView, surfaceId: string): void {
-  const selected = surfaceId === state.selectedSurfaceId;
-  view.term.options.cursorBlink = selected;
-  view.term.options.cursorInactiveStyle = selected ? "outline" : "none";
+  const focused = surfaceId === state.focusedSurfaceId;
+  view.panel.toggleAttribute("data-focused", focused);
+  view.term.options.cursorBlink = focused;
+  view.term.options.cursorInactiveStyle = focused ? "outline" : "none";
+}
+
+function setTerminalFocus(surfaceId: string | null): void {
+  const previous = state.focusedSurfaceId;
+  if (previous === surfaceId) return;
+  state.focusedSurfaceId = surfaceId;
+  for (const id of [previous, surfaceId]) {
+    const view = id && state.surfaceViews.get(id);
+    if (id && view) updateSurfaceCursor(view, id);
+  }
+}
+
+export function blurRemoteTerminal(): void {
+  setTerminalFocus(null);
+  const active = document.activeElement;
+  if (active instanceof HTMLElement && active.closest(".terminal-host, .ai-chat-mount")) active.blur();
 }
 
 function applySurfaceInputPolicy(view: SurfaceView, surface: LayoutSurface | undefined): void {
@@ -918,9 +939,9 @@ function bindCanvasPan(view: SurfaceView, select: () => void): () => void {
     const { baseY, viewportY } = view.term.buffer.active;
     const vertical = event.deltaY !== 0 && Math.abs(event.deltaY) >= Math.abs(event.deltaX);
     if (vertical) {
-      const wasSelected = view.panel.classList.contains("selected");
+      const wasFocused = view.panel.hasAttribute("data-focused");
       select();
-      if (!wasSelected && !mobile && view.opened && !view.term.options.disableStdin) view.term.focus();
+      if (!wasFocused && !mobile && view.opened && !view.term.options.disableStdin) view.term.focus();
     }
     if (view.term.modes.mouseTrackingMode !== "none" && !event.shiftKey) return;
 

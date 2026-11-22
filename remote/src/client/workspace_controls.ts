@@ -1,4 +1,5 @@
 import { tr } from "./i18n";
+import { isTabTitle, MAX_TAB_TITLE_BYTES } from "../workspace_protocol";
 import { iconAdd, iconDelete, iconTabControl } from "./icons";
 import { isMobileRemoteShell } from "./mobile_layout";
 import { currentTab, state, tabControlId } from "./state";
@@ -16,12 +17,14 @@ type WorkspaceCallbacks = {
   controlChanged: () => void;
 };
 
-export function workspaceTabActionsMarkup(classes = ""): string {
+export function workspaceTabActionsMarkup(classes = "", controlPosition: "start" | "end" = "start"): string {
+  const control = `<button type="button" class="icon-button tab-control-toggle" hidden>${iconTabControl(false)}</button>`;
+  const actions = `
+    <button type="button" class="icon-button tab-add-pane" hidden>${iconAdd()}</button>
+    <button type="button" class="icon-button tab-delete" hidden>${iconDelete()}</button>`;
   return `
     <div class="workspace-tab-actions${classes}" role="group" aria-label="${tr("Selected tab actions", "当前标签操作")}" hidden>
-      <button type="button" class="icon-button tab-add-pane">${iconAdd()}</button>
-      <button type="button" class="icon-button tab-delete">${iconDelete()}</button>
-      <button type="button" class="icon-button tab-control-toggle" hidden>${iconTabControl(false)}</button>
+      ${controlPosition === "end" ? actions + control : control + actions}
     </div>`;
 }
 
@@ -35,6 +38,7 @@ export function bindWorkspaceControls(root: HTMLElement, callbacks: WorkspaceCal
   const status = root.querySelector<HTMLOutputElement>("#workspace-action-status")!;
   const stage = root.querySelector<HTMLElement>("#remote-panels")!;
   let confirmedAction: WorkspaceCommand | null = null;
+  let tabTap: { key: string; timer: ReturnType<typeof setTimeout> } | null = null;
 
   const panels = bindWorkspacePanels(stage, {
     close: ({ tabId, layoutRevision }, surfaceId) => void run({ action: "close-pane", tabId, layoutRevision, surfaceId }),
@@ -130,7 +134,13 @@ export function bindWorkspaceControls(root: HTMLElement, callbacks: WorkspaceCal
       button.dataset.tabIndex = String(tab.index);
       button.setAttribute("aria-pressed", String(active));
       button.setAttribute("aria-label", tr(`${title}, ${count} ${count === 1 ? "panel" : "panels"}`, `${title}，${count} 个面板`));
-      button.title = title;
+      if (canRename(tab)) {
+        button.title = tr(`${title} · Double-click or press F2 to rename`, `${title} · 双击或按 F2 改名`);
+        button.setAttribute("aria-keyshortcuts", "F2");
+      } else {
+        button.title = title;
+        button.removeAttribute("aria-keyshortcuts");
+      }
       row.toggleAttribute("data-current", active);
       const label = row.querySelector<HTMLElement>(".tab-chip-label")!;
       const countLabel = row.querySelector<HTMLElement>(".tab-chip-count")!;
@@ -147,14 +157,87 @@ export function bindWorkspaceControls(root: HTMLElement, callbacks: WorkspaceCal
     row.dataset.tabKey = key;
     row.innerHTML = `
       <button type="button" class="tab-chip"><span class="tab-chip-label"></span></button>
-      ${workspaceTabActionsMarkup()}
+      <input type="text" class="tab-title-input" aria-label="${tr("Tab name", "标签名称")}" autocomplete="off" spellcheck="false" hidden>
+      ${workspaceTabActionsMarkup("", "end")}
       <span class="tab-chip-count" aria-hidden="true"></span>`;
     const button = row.querySelector<HTMLButtonElement>(".tab-chip")!;
+    const editor = row.querySelector<HTMLInputElement>(".tab-title-input")!;
+    const tabForRow = () => state.layoutState?.tabs.find((tab) => tab.workspace?.tabId === key);
+    let original = "";
     const select = () => callbacks.selectTab(Number(button.dataset.tabIndex));
-    button.addEventListener("click", select);
+    function startRename(): void {
+      const tab = tabForRow();
+      if (!editor.hidden || !canRename(tab) || !workspaceActionAvailable()) return;
+      original = tab?.title ?? "";
+      editor.value = original;
+      button.hidden = true;
+      editor.hidden = false;
+      editor.focus();
+      editor.select();
+    }
+
+    function stopRename(save: boolean, restoreFocus: boolean): void {
+      if (editor.hidden) return;
+      const title = editor.value;
+      if (save && !isTabTitle(title)) {
+        status.textContent = tr(
+          `Enter a single-line name of up to ${MAX_TAB_TITLE_BYTES} UTF-8 bytes.`,
+          `请输入单行名称，最多 ${MAX_TAB_TITLE_BYTES} 个 UTF-8 字节。`,
+        );
+        if (restoreFocus) {
+          editor.setAttribute("aria-invalid", "true");
+          return;
+        }
+        save = false;
+      }
+      editor.hidden = true;
+      editor.removeAttribute("aria-invalid");
+      button.hidden = false;
+      if (restoreFocus) button.focus({ preventScroll: true });
+      const target = tabForRow()?.workspace;
+      if (save && target && title !== original) {
+        void run({ action: "rename-tab", tabId: target.tabId, layoutRevision: target.layoutRevision, title });
+      }
+    }
+
+    button.addEventListener("click", (event) => {
+      const secondTap = tabTap?.key === key;
+      if (tabTap) clearTimeout(tabTap.timer);
+      tabTap = null;
+      if (!event.detail || !isMobileRemoteShell() || !canRename(tabForRow())) {
+        select();
+        return;
+      }
+      if (secondTap) {
+        startRename();
+        return;
+      }
+      // Leave the drawer visible for a second tap on a renameable label.
+      tabTap = { key, timer: setTimeout(() => {
+        tabTap = null;
+        if (state.drawerOpen && row.isConnected && editor.hidden) select();
+      }, 300) };
+    });
+    button.addEventListener("dblclick", () => startRename());
+    button.addEventListener("keydown", (event) => {
+      if (event.key !== "F2" || !canRename(tabForRow())) return;
+      event.preventDefault();
+      startRename();
+    });
+    editor.addEventListener("keydown", (event) => {
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key !== "Enter" && event.key !== "Escape") return;
+      event.preventDefault();
+      stopRename(event.key === "Enter", true);
+    });
+    editor.addEventListener("blur", () => stopRename(true, false));
     row.querySelector(".tab-chip-count")?.addEventListener("click", select);
     bindTabActions(row);
     return row;
+  }
+
+  function canRename(tab: LayoutTab | undefined): boolean {
+    return state.layoutState?.tabRename === true && Boolean(tab?.workspace);
   }
 
   function bindTabActions(element: HTMLElement): void {
@@ -200,14 +283,17 @@ function updateTabActions(group: HTMLElement, tab: LayoutTab, available: boolean
   const tabId = tabControlId(tab);
   const held = tabId !== undefined && tabControl.leaseId(tabId) !== undefined;
   const requiresControl = tabId !== undefined && !held;
-  const readOnlyHint = requiresControl ? tr("Take control of this tab to make changes", "接管当前标签后可修改") : null;
+  group.toggleAttribute("data-control", tabId !== undefined);
+  group.toggleAttribute("data-held", held);
+  add.hidden = requiresControl;
+  remove.hidden = requiresControl;
   const addLabel = tr(`Add terminal to ${title}`, `在「${title}」新增终端`);
   add.disabled = !available || limit;
-  add.title = limit ? tr("Up to four terminals can be added from the web", "网页端最多新增到四个终端") : readOnlyHint ?? addLabel;
+  add.title = limit ? tr("Up to four terminals can be added from the web", "网页端最多新增到四个终端") : addLabel;
   add.setAttribute("aria-label", addLabel);
   remove.disabled = !available;
   const removeLabel = tr(`Delete tab ${title}`, `删除标签「${title}」`);
-  remove.title = readOnlyHint ?? removeLabel;
+  remove.title = removeLabel;
   remove.setAttribute("aria-label", removeLabel);
   control.hidden = !tabId;
   control.disabled = !tabControl.isAvailable();

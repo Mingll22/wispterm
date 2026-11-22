@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const AppWindow = @import("../AppWindow.zig");
+const tab = @import("../appwindow/tab.zig");
 const window_backend = @import("../platform/window_backend.zig");
 const file_explorer = AppWindow.file_explorer;
 const browser_panel = AppWindow.browser_panel;
@@ -58,20 +59,24 @@ fn mutatePasteData(data: []u8, bracketed: bool) void {
 
 const pty_write_log = std.log.scoped(.pty_write);
 
-/// Write data to the PTY's input pipe (us -> child stdin).
-///
-/// This is the keyboard/paste input boundary, so it is intentionally
-/// fire-and-forget: there is no caller positioned to recover from backpressure.
-/// queuePtyWrite still surfaces its outcome — on failure we log a visible
-/// warning instead of silently swallowing input.
-pub fn writeToPty(surface: *Surface, data: []const u8) void {
-    surface.queuePtyWrite(data) catch |err| {
-        if (err == error.RemoteControlActive) return;
-        pty_write_log.warn("dropped {d} bytes of input: {s}", .{ data.len, @errorName(err) });
+pub const TerminalInputOrigin = enum { desktop, preserve_control };
+
+/// Write already encoded bytes to the PTY. Only events that directly express
+/// desktop terminal input can take back a browser-controlled tab.
+pub fn writeToPty(surface: *Surface, data: []const u8, origin: TerminalInputOrigin) bool {
+    if (data.len == 0) return false;
+    const result = switch (origin) {
+        .desktop => tab.queueDesktopTerminalInput(surface, data),
+        .preserve_control => surface.queuePtyWrite(data),
     };
+    result catch |err| {
+        if (err != error.RemoteControlActive) pty_write_log.warn("dropped {d} bytes of input: {s}", .{ data.len, @errorName(err) });
+        return false;
+    };
+    return true;
 }
 
-pub fn writePasteToPty(surface: *Surface, allocator: std.mem.Allocator, data: []const u8) void {
+fn writePasteToPty(surface: *Surface, allocator: std.mem.Allocator, data: []const u8, origin: TerminalInputOrigin) void {
     if (data.len == 0) return;
 
     // Like Ghostty's completeClipboardPaste, snapshot the negotiated mode under
@@ -96,7 +101,7 @@ pub fn writePasteToPty(surface: *Surface, allocator: std.mem.Allocator, data: []
         };
         defer allocator.free(framed);
         mutatePasteData(framed[start.len .. framed.len - end.len], true);
-        writeToPty(surface, framed);
+        _ = writeToPty(surface, framed, origin);
         return;
     }
 
@@ -114,7 +119,7 @@ pub fn writePasteToPty(surface: *Surface, allocator: std.mem.Allocator, data: []
         if (owned) |buf| allocator.free(buf);
     }
 
-    writeToPty(surface, body);
+    _ = writeToPty(surface, body, origin);
 }
 
 fn initPasteTestSurface(surface: *Surface) !void {
@@ -153,12 +158,12 @@ test "paste uses negotiated mode and queues complete Vim multiline paste (issue 
     stream.nextSlice("04h");
     const script = "#SBATCH -w node01\n#SBATCH -c 24\n\nset -euo pipefail\n\n" ++
         "for f in \"$A\" \"$B\"; do\n    [[ -s \"$f\" ]] || exit 1\ndone\n";
-    writePasteToPty(&surface, std.testing.allocator, script);
+    writePasteToPty(&surface, std.testing.allocator, script, .desktop);
     try expectPasteTestWrite(&surface, "\x1b[200~" ++ script ++ "\x1b[201~");
 
     // Leaving Vim must restore ordinary paste, including LF -> CR conversion.
     stream.nextSlice("\x1b[?2004l");
-    writePasteToPty(&surface, std.testing.allocator, "one\ntwo\n");
+    writePasteToPty(&surface, std.testing.allocator, "one\ntwo\n", .desktop);
     try expectPasteTestWrite(&surface, "one\rtwo\r");
 }
 
@@ -170,7 +175,7 @@ test "large bracketed paste retains framing and sanitizes embedded escape bytes"
     surface.terminal.modes.set(.bracketed_paste, true);
 
     const body = "  # comment\n\n" ** 40;
-    writePasteToPty(&surface, std.testing.allocator, body ++ "\x1b[201~\x03");
+    writePasteToPty(&surface, std.testing.allocator, body ++ "\x1b[201~\x03", .desktop);
     try expectPasteTestWrite(&surface, "\x1b[200~" ++ body ++ " [201~ \x1b[201~");
 }
 
@@ -189,12 +194,144 @@ test "bracketed paste fits the last mailbox slot without losing its body or end 
     first.deinit();
     queued -= 1;
 
-    writePasteToPty(&surface, std.testing.allocator, "#SBATCH\n\n    command\n");
+    writePasteToPty(&surface, std.testing.allocator, "#SBATCH\n\n    command\n", .desktop);
     for (0..queued) |_| {
         const msg = surface.mailbox.popWrite() orelse return error.MissingFiller;
         msg.deinit();
     }
     try expectPasteTestWrite(&surface, "\x1b[200~#SBATCH\n\n    command\n\x1b[201~");
+}
+
+test "desktop terminal input reclaims just the touched tab and queues its first bytes" {
+    const allocator = std.testing.allocator;
+    const SplitTree = @import("../split_tree.zig");
+    const Hub = @import("../remote_hub.zig").Hub;
+    const active_tab_state = @import("../appwindow/active_tab.zig");
+    const workspace = @import("../remote_workspace.zig");
+
+    var hub = Hub.init(allocator);
+    defer hub.deinit();
+    const surfaces = try allocator.alloc(Surface, 3);
+    defer allocator.free(surfaces);
+    var initialized: usize = 0;
+    defer for (surfaces[0..initialized]) |*surface| {
+        surface.terminal.deinit(allocator);
+        surface.mailbox.deinit();
+    };
+    for (surfaces, 1..) |*surface, id| {
+        try initPasteTestSurface(surface);
+        initialized += 1;
+        surface.ref_count = 1;
+        surface.remote_id = workspace.formatId(id);
+        surface.remote_hub = .init(null);
+        surface.confirmed_grid = .init(80 << 16 | 24);
+        surface.remote_terminal.enabled = true;
+        surface.remote_terminal.clock = try std.time.Timer.start();
+        surface.attachRemoteHub(&hub);
+    }
+
+    const saved_tabs = tab.g_tabs;
+    const saved_count = tab.g_tab_count;
+    const saved_active = active_tab_state.g_active_tab;
+    const saved_hub = tab.g_remote_hub;
+    defer {
+        tab.g_tabs = saved_tabs;
+        tab.g_tab_count = saved_count;
+        active_tab_state.g_active_tab = saved_active;
+        tab.g_remote_hub = saved_hub;
+    }
+
+    const nodes = [_]SplitTree.Node{
+        .{ .split = .{ .layout = .horizontal, .ratio = 0.5, .left = @enumFromInt(1), .right = @enumFromInt(2) } },
+        .{ .leaf = .{ .terminal = &surfaces[0] } },
+        .{ .leaf = .{ .terminal = &surfaces[1] } },
+    };
+    var first: tab.TabState = .{
+        .tree = try SplitTree.cloneNodes(allocator, &nodes, null),
+        .focused = @enumFromInt(1),
+        .workspace_id = workspace.formatId(10),
+    };
+    defer first.tree.deinit();
+    var other: tab.TabState = .{
+        .tree = try SplitTree.init(allocator, &surfaces[2]),
+        .workspace_id = workspace.formatId(20),
+    };
+    defer other.tree.deinit();
+    tab.g_tabs = .{null} ** tab.MAX_TABS;
+    tab.g_tabs[0] = &first;
+    tab.g_tabs[1] = &other;
+    tab.g_tab_count = 2;
+    active_tab_state.g_active_tab = 0;
+    tab.g_remote_hub = &hub;
+
+    const Probe = struct {
+        notices: usize = 0,
+        tab_id: workspace.Id,
+
+        fn send(ctx: *anyopaque, message: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (std.mem.indexOf(u8, message, "\"reason\":\"desktop\"") == null) return;
+            if (std.mem.indexOf(u8, message, &self.tab_id) == null) return;
+            if (std.mem.indexOf(u8, message, "\"clientId\":null,\"leaseId\":null") == null) return;
+            self.notices += 1;
+        }
+
+        fn acquire(target: *tab.TabState, test_hub: *Hub) u32 {
+            target.remote_tab_control.request(&target.tree, test_hub, .{
+                .type = "tab-control",
+                .action = .acquire,
+                .clientId = "phone",
+                .tabId = target.publishRemoteWorkspace().?,
+            });
+            return target.remote_tab_control.lease.grant.?.id;
+        }
+
+        fn sendLeasedInput(test_hub: *Hub, surface: *Surface, lease: u32) !void {
+            var buffer: [160]u8 = undefined;
+            const message = try std.fmt.bufPrint(&buffer,
+                \\{{"type":"input-bytes","clientId":"phone","leaseId":{d},"surfaceId":"{s}","data":"52"}}
+            , .{ lease, &surface.remote_id });
+            test_hub.handleRelayMessage(message);
+        }
+
+        fn checkWrite(surface: *Surface, admitted: bool, expected: []const u8) !void {
+            const message = surface.mailbox.popWrite() orelse return error.MissingTerminalInput;
+            defer message.deinit();
+            const payload = message.write_small;
+            try std.testing.expectEqualStrings(expected, payload.data[0..payload.len]);
+            try std.testing.expectEqual(admitted, surface.admitPtyWrite(payload.input_epoch));
+        }
+    };
+    var probe: Probe = .{ .tab_id = first.workspace_id.? };
+    hub.addTransport(&probe, Probe.send);
+    const first_lease = Probe.acquire(&first, &hub);
+    const other_lease = Probe.acquire(&other, &hub);
+
+    try Probe.sendLeasedInput(&hub, &surfaces[0], first_lease);
+    try Probe.sendLeasedInput(&hub, &surfaces[1], first_lease);
+    try Probe.sendLeasedInput(&hub, &surfaces[2], other_lease);
+    try std.testing.expect(!writeToPty(&surfaces[0], "automation", .preserve_control));
+    try std.testing.expect(!writeToPty(&surfaces[2], "background tab", .desktop));
+    try std.testing.expectEqual(@as(usize, 0), probe.notices);
+
+    const committed_text = "你";
+    try std.testing.expect(writeToPty(&surfaces[0], committed_text, .desktop));
+    try Probe.checkWrite(&surfaces[0], false, "R");
+    try Probe.checkWrite(&surfaces[0], true, committed_text);
+    try Probe.checkWrite(&surfaces[1], false, "R");
+    try Probe.checkWrite(&surfaces[2], true, "R");
+    try std.testing.expect(!surfaces[0].remoteControlActive() and !surfaces[1].remoteControlActive());
+    try std.testing.expectEqual(other_lease, other.remote_tab_control.lease.grant.?.id);
+    try std.testing.expectEqual(@as(usize, 1), probe.notices);
+
+    try Probe.sendLeasedInput(&hub, &surfaces[0], first_lease);
+    try std.testing.expect(surfaces[0].mailbox.popWrite() == null);
+    _ = Probe.acquire(&first, &hub);
+    surfaces[1].terminal.modes.set(.bracketed_paste, true);
+    writePasteToPty(&surfaces[1], allocator, "first\nline", .desktop);
+    try Probe.checkWrite(&surfaces[1], true, "\x1b[200~first\nline\x1b[201~");
+    try std.testing.expectEqual(@as(usize, 2), probe.notices);
+    try std.testing.expectEqual(other_lease, other.remote_tab_control.lease.grant.?.id);
 }
 
 fn quotePathForPaste(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
@@ -316,7 +453,7 @@ fn pasteSavedClipboardImage(surface: *Surface, allocator: std.mem.Allocator, ima
     defer allocator.free(pasted);
 
     std.debug.print("Pasting clipboard image path: {s}\n", .{target_path});
-    writePasteToPty(surface, allocator, pasted);
+    writePasteToPty(surface, allocator, pasted, .desktop);
     return true;
 }
 
@@ -329,7 +466,7 @@ const DeferredSshDropPaste = struct {
 
 fn deferredSshDropPasteSuccess(ctx: ?*anyopaque) void {
     const pending: *DeferredSshDropPaste = @ptrCast(@alignCast(ctx orelse return));
-    writePasteToPty(pending.surface, pending.allocator, pending.text);
+    writePasteToPty(pending.surface, pending.allocator, pending.text, .preserve_control);
 }
 
 fn deferredSshDropPasteDestroy(ctx: ?*anyopaque) void {
@@ -639,7 +776,7 @@ fn pasteClipboardTextToActiveSurface() bool {
 
     if (text.len == 0) return false;
     std.debug.print("Pasting {} UTF-8 bytes from clipboard\n", .{text.len});
-    writePasteToPty(surface, allocator, text);
+    writePasteToPty(surface, allocator, text, .desktop);
     return true;
 }
 
@@ -855,13 +992,15 @@ pub fn pasteImageFromClipboard() bool {
     return true;
 }
 
+/// Send a command or prompt explicitly selected in the desktop UI.
 pub fn writeTextToActivePty(text: []const u8) void {
     const surface = AppWindow.activeSurface() orelse return;
-    writeToPty(surface, text);
+    _ = writeToPty(surface, text, .desktop);
 }
 
+/// Send program-generated input such as a pending SSH password.
 pub fn writeTextToSurfacePty(surface: *Surface, text: []const u8) void {
-    writeToPty(surface, text);
+    _ = writeToPty(surface, text, .preserve_control);
 }
 
 test "terminal selection copy unwraps visual line wrapping (issue 595)" {

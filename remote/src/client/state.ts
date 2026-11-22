@@ -13,6 +13,7 @@ export const state = {
   layoutState: null as LayoutState | null,
   selectedTabIndex: 0,
   selectedSurfaceId: null as string | null,
+  focusedSurfaceId: null as string | null,
   surfaceViews: new Map<string, SurfaceView>(),
   hasSeenLayout: false,
   kbdVisible: false,
@@ -58,4 +59,5 @@ export function inputLeaseId(surfaceId: string, tab = currentTab()): number | un
 
 export function resetSurfaceViews(): void {
   state.surfaceViews = new Map();
+  state.focusedSurfaceId = null;
 }

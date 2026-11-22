@@ -4,6 +4,7 @@ const std = @import("std");
 
 pub const Id = [16]u8;
 pub const max_tree_nodes = 127;
+pub const max_tab_title_bytes = 256;
 
 pub const Axis = enum { x, y };
 
@@ -13,7 +14,7 @@ pub const Node = struct {
     ratio: ?f64 = null,
 };
 
-pub const Action = enum { @"create-tab", @"add-pane", @"close-pane", @"close-tab", @"set-layout" };
+pub const Action = enum { @"create-tab", @"add-pane", @"close-pane", @"close-tab", @"set-layout", @"rename-tab" };
 
 pub const Request = struct {
     type: []const u8,
@@ -25,6 +26,7 @@ pub const Request = struct {
     leaseId: ?u32 = null,
     surfaceId: ?Id = null,
     splitTree: ?[]const Node = null,
+    title: ?[]const u8 = null,
 };
 
 pub const Status = enum { ok, stale, unsupported, protected, limit, failed, denied };
@@ -67,15 +69,33 @@ pub fn parse(allocator: std.mem.Allocator, message: []const u8) ?std.json.Parsed
     return null;
 }
 
+/// A single UTF-8 line of title text; an empty string clears the override.
+pub fn validTabTitle(title: []const u8) bool {
+    if (title.len > max_tab_title_bytes) return false;
+    const view = std.unicode.Utf8View.init(title) catch return false;
+    var codepoints = view.iterator();
+    while (codepoints.nextCodepoint()) |codepoint| {
+        switch (codepoint) {
+            0...0x1f, 0x7f...0x9f, 0x2028, 0x2029 => return false,
+            else => {},
+        }
+    }
+    return true;
+}
+
 fn validRequest(request: Request) bool {
     if (!validRequestId(request.requestId) or request.clientId.len == 0 or request.clientId.len > 64) return false;
 
     if (request.action == .@"create-tab") {
-        return request.tabId == null and request.layoutRevision == null and request.leaseId == null and request.surfaceId == null and request.splitTree == null;
+        return request.tabId == null and request.layoutRevision == null and request.leaseId == null and request.surfaceId == null and request.splitTree == null and request.title == null;
     }
     if (!validId(request.tabId orelse return false) or !validId(request.layoutRevision orelse return false)) return false;
+    if (request.action == .@"rename-tab") {
+        return request.leaseId == null and request.surfaceId == null and request.splitTree == null and validTabTitle(request.title orelse return false);
+    }
+    if (request.title != null) return false;
     return switch (request.action) {
-        .@"create-tab" => unreachable,
+        .@"create-tab", .@"rename-tab" => unreachable,
         .@"add-pane", .@"close-pane" => request.splitTree == null and validId(request.surfaceId orelse return false),
         .@"close-tab" => request.surfaceId == null and request.splitTree == null,
         .@"set-layout" => request.surfaceId == null and validTree(request.splitTree orelse return false),
@@ -117,4 +137,28 @@ test "workspace wire requires stable targets and complete finite binary trees" {
     try std.testing.expect(parse(a,
         \\{"type":"workspace-action","clientId":"browser","requestId":"id-2","action":"close-tab","tabId":"0123456789abcdef"}
     ) == null);
+}
+
+test "workspace rename accepts one UTF-8 line without a lease" {
+    const a = std.testing.allocator;
+    const target = "{\"type\":\"workspace-action\",\"clientId\":\"browser\",\"requestId\":\"rename-id\",\"action\":\"rename-tab\",\"tabId\":\"0123456789abcdef\",\"layoutRevision\":\"1111111111111111\"";
+    const max_title = "🔧" ** 64;
+    const titled = parse(a, target ++ ",\"title\":\"" ++ max_title ++ "\"}").?;
+    defer titled.deinit();
+    try std.testing.expectEqualStrings(max_title, titled.value.title.?);
+    const cleared = parse(a, target ++ ",\"title\":\"\"}").?;
+    defer cleared.deinit();
+    try std.testing.expectEqualStrings("", cleared.value.title.?);
+    try std.testing.expect(parse(a, target ++ "}") == null);
+    try std.testing.expect(parse(a, target ++ ",\"title\":null}") == null);
+    try std.testing.expect(parse(a, target ++ ",\"title\":\"Desk\",\"leaseId\":4}") == null);
+    try std.testing.expect(parse(a, target ++ ",\"title\":\"Desk\",\"surfaceId\":\"0000000000000001\"}") == null);
+    try std.testing.expect(parse(a, target ++ ",\"title\":\"" ++ max_title ++ "a\"}") == null);
+    for ([_][]const u8{ "\\n", "\\u001b", "\\u007f", "\\u0085", "\\u2028", "\\u2029", "\\ud800" }) |control| {
+        const invalid = try std.fmt.allocPrint(a, "{s},\"title\":\"a{s}b\"}}", .{ target, control });
+        defer a.free(invalid);
+        try std.testing.expect(parse(a, invalid) == null);
+    }
+    try std.testing.expect(!validTabTitle("\xff"));
+    try std.testing.expect(validTabTitle("  Work  "));
 }
