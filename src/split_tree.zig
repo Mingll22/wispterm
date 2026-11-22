@@ -151,8 +151,14 @@ pub fn deinit(self: *SplitTree) void {
 
 /// Clone this tree, returning a new tree with the same nodes.
 pub fn clone(self: *const SplitTree, gpa: Allocator) Allocator.Error!SplitTree {
+    return cloneNodes(gpa, self.nodes, self.zoomed);
+}
+
+/// Copy a validated node array, taking a reference to every live pane.
+/// The caller guarantees the handles describe a complete tree rooted at 0.
+pub fn cloneNodes(gpa: Allocator, source: []const Node, zoomed: ?Node.Handle) Allocator.Error!SplitTree {
     // If we're empty then return an empty tree.
-    if (self.isEmpty()) return .empty;
+    if (source.len == 0) return .empty;
 
     // Create a new arena allocator for the clone.
     var arena = ArenaAllocator.init(gpa);
@@ -160,7 +166,7 @@ pub fn clone(self: *const SplitTree, gpa: Allocator) Allocator.Error!SplitTree {
     const alloc = arena.allocator();
 
     // Allocate a new nodes array and copy the existing nodes into it.
-    const nodes = try alloc.dupe(Node, self.nodes);
+    const nodes = try alloc.dupe(Node, source);
 
     // Increase the reference count of all the surfaces in the nodes.
     try refNodes(nodes);
@@ -168,7 +174,7 @@ pub fn clone(self: *const SplitTree, gpa: Allocator) Allocator.Error!SplitTree {
     return .{
         .arena = arena,
         .nodes = nodes,
-        .zoomed = self.zoomed,
+        .zoomed = zoomed,
     };
 }
 

@@ -2338,8 +2338,7 @@ fn resetInputRepaintForTest() void {
 /// Put back the dirty globals a test saved before it ran — the one restore
 /// site, so tests do not each write the globals directly.
 fn restoreInputRepaintForTest(force_rebuild: bool, cells_valid: bool) void {
-    AppWindow.g_force_rebuild = force_rebuild;
-    AppWindow.g_cells_valid = cells_valid;
+    AppWindow.restoreDirtyFlagsForTest(force_rebuild, cells_valid);
 }
 
 fn applyInputEffect(effect: ui_effect.UiEffect) void {
@@ -2398,6 +2397,12 @@ pub fn cancelTransientMouseState(win: anytype) void {
     AppWindow.assistant_conversation_renderer.g_transcript_scrollbar_hover = false;
     g_ai_text_select = .{};
     window_backend.clearTransientInput(win);
+}
+
+/// These gestures retain a pane handle or tab index until the mouse is released.
+pub fn workspaceGestureActive() bool {
+    return g_divider_dragging or g_panel_swap_source != null or g_sidebar_tab_drag_pressed != null or
+        g_selecting or g_scrollbar_drag_surface != null or tab.g_tab_close_pressed != null or tab.g_tab_rename_active;
 }
 
 pub fn toggleSidebar() void {
@@ -3367,8 +3372,12 @@ fn executeCommand(cmd: command_dispatch.Command) bool {
         .focus_panel => |n| return AppWindow.focusPanel(n),
         .equalize_splits => AppWindow.equalizeSplits(),
         .transpose_split => return AppWindow.transposeSplits(),
-        .next_tab => AppWindow.switchTab((active_tab_state.g_active_tab + 1) % tab.g_tab_count),
+        .next_tab => {
+            if (tab.g_tab_count == 0) return false;
+            AppWindow.switchTab((active_tab_state.g_active_tab + 1) % tab.g_tab_count);
+        },
         .previous_tab => {
+            if (tab.g_tab_count == 0) return false;
             if (active_tab_state.g_active_tab > 0) AppWindow.switchTab(active_tab_state.g_active_tab - 1) else AppWindow.switchTab(tab.g_tab_count - 1);
         },
         .open_config => {

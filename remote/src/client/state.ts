@@ -2,6 +2,7 @@ import type { LayoutState, LayoutTab, MobileInputMode, SurfaceView } from "./typ
 import { terminalControl } from "./terminal_control";
 import {
   readSavedDesktopPanelMode,
+  readSavedMobilePanelMode,
   readSavedMobileVisualZoom,
   readSavedSidebarCollapsed,
 } from "./storage";
@@ -17,6 +18,7 @@ export const state = {
   drawerOpen: false,
   sidebarCollapsed: readSavedSidebarCollapsed() ?? false,
   desktopPanelMode: readSavedDesktopPanelMode(),
+  mobilePanelMode: readSavedMobilePanelMode(),
   mobileInputMode: "edit" as MobileInputMode,
   mobileVisualZoom: readSavedMobileVisualZoom(),
   activeSessionKey: null as string | null,

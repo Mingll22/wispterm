@@ -11,6 +11,22 @@ Relay server for WispTerm remote access. Provides:
 The browser mirrors WispTerm tabs and split panels from layout snapshots, then
 routes input back to the selected surface.
 
+## Tabs and split panels
+
+On a connected desktop that supports workspace actions, **New tab** opens the
+configured default terminal. Use **+** on the selected tab to add a terminal
+up to four panes. On a phone, **+** and **Delete tab** are in the top bar.
+The **×** in a terminal header closes that pane, and deleting a tab shows how
+many terminals it will close. When the desktop requires confirmation for a
+running program, close the terminal from WispTerm to review the prompt.
+
+In **Settings → Split layout**, select **Mirror layout** or **Single panel**.
+The browser saves the choice separately for desktop and phone widths. In
+mirror mode, drag the handle in a pane header onto another pane's center to
+swap the two panels, or onto an edge to split there. Aligned dividers move
+together. Double-click a divider or press Enter while it is focused to restore
+equal halves at every split. Existing shells stay attached to their panes.
+
 ## Interface language
 
 The remote console starts in Simplified Chinese for Chinese browser languages and in English otherwise.
@@ -279,6 +295,22 @@ split changes also return control immediately. Detached clients lose their
 lease when it expires. The desktop applies PTY resizes only when the effective
 grid changes and broadcasts the new grid in order with the terminal byte stream.
 Other terminal panes and AI Chat use their existing paths.
+
+### Workspace actions
+
+Desktop layouts advertise `workspaceActions: true`. Editable terminal tabs
+include a stable `tabId`, `layoutRevision` and `splitTree`. The tree is in
+preorder, with `{ "surfaceId": "…" }` leaves and `{ "axis": "x", "ratio": 0.5 }`
+branch nodes followed by both children. The `x` axis splits left/right and `y`
+splits top/bottom.
+
+An authenticated, paired browser submits `workspace-action` with a `requestId`
+and one of `create-tab`, `add-pane`, `close-pane`, `close-tab`, or `set-layout`.
+Tab actions include the published `tabId` and `layoutRevision`. Pane actions
+also provide a stable `surfaceId`, and `set-layout` carries the new tree for
+the same terminals. The desktop rejects outdated revisions and checks the
+target before applying a change. The relay routes `workspace-action-result`
+to the requester; the resulting layout arrives in the shared desktop snapshot.
 
 The relay can also ask WispTerm to create an Agent tab when Weixin input has no
 AI Chat target:

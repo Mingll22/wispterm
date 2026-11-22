@@ -1226,6 +1226,18 @@ pub fn setScreenSizeWithPolicy(
     layout: DesktopLayout,
     resize_policy: ResizePolicy,
 ) bool {
+    return self.applyDesktopLayout(layout, resize_policy, .desktop);
+}
+
+/// A Web workspace edit changes the desktop grid underneath a browser lease.
+/// The lease remains in control of the PTY until it is released or reclaimed.
+pub fn setRemoteWorkspaceLayout(self: *Surface, layout: DesktopLayout) void {
+    _ = self.applyDesktopLayout(layout, .immediate, .remote_workspace);
+}
+
+const LayoutOrigin = enum { desktop, remote_workspace };
+
+fn applyDesktopLayout(self: *Surface, layout: DesktopLayout, resize_policy: ResizePolicy, origin: LayoutOrigin) bool {
     self.remote_terminal.mutex.lock();
     defer self.remote_terminal.mutex.unlock();
     const state = &self.remote_terminal.state;
@@ -1240,7 +1252,7 @@ pub fn setScreenSizeWithPolicy(
     self.size.padding = layout.padding;
     self.size.computeGrid();
     state.desktop_grid = self.size.grid;
-    if (geometry_changed and state.reclaim()) self.publishControlStateLocked(.desktop);
+    if (geometry_changed and origin == .desktop and state.reclaim()) self.publishControlStateLocked(.desktop);
 
     const target = state.targetGrid();
     if (!remote_control.sameGrid(previous_target, target)) self.queueGrid(target, resize_policy);
@@ -2340,6 +2352,43 @@ test "native geometry reclaims an unchanged cell grid and drops stale leased inp
     try std.testing.expect(!surface.admitPtyWrite(queued.write_small.input_epoch));
     try std.testing.expect(surface.prepareResize(.{}) == null);
     try surface.queuePtyWrite("desktop");
+}
+
+test "web workspace geometry preserves the lease and only changes the natural grid" {
+    var surface: Surface = undefined;
+    try writeOutcomeHarness(&surface);
+    defer writeOutcomeHarnessDeinit(&surface);
+    surface.remote_hub = .init(null);
+    surface.confirmed_grid = .init(packGrid(.{}));
+    surface.size = .{};
+    surface.remote_terminal.enabled = true;
+    surface.remote_terminal.clock = try std.time.Timer.start();
+
+    var layout: DesktopLayout = .{
+        .width = 800,
+        .height = 480,
+        .cell_width = 10,
+        .cell_height = 20,
+        .padding = .{},
+        .split = .{ 0, 0, 1, 1 },
+        .content_size = .{ 800, 480 },
+    };
+    _ = surface.setScreenSizeWithPolicy(layout, .immediate);
+    remoteControlRequest(&surface, .{ .client_id = "phone", .action = .acquire });
+
+    layout.width = 400;
+    layout.split[2] = 0.5;
+    surface.setRemoteWorkspaceLayout(layout);
+    try std.testing.expectEqual(GridSize{ .cols = 40, .rows = 24 }, surface.desktopGrid());
+    try std.testing.expectEqual(GridSize{}, surface.remote_terminal.state.targetGrid());
+    try std.testing.expect(surface.mailbox.takePendingImmediateResize() == null);
+    _ = surface.setScreenSizeWithPolicy(layout, .immediate);
+    try std.testing.expect(surface.remoteControlActive());
+
+    layout.width += 1;
+    _ = surface.setScreenSizeWithPolicy(layout, .coalesced);
+    try std.testing.expect(!surface.remoteControlActive());
+    try std.testing.expectEqual(GridSize{ .cols = 40, .rows = 24 }, surface.mailbox.takePendingResize().?);
 }
 
 fn ioStateHarness(surface: *Surface) !void {

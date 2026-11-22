@@ -199,6 +199,7 @@ comptime {
         _ = @import("remote_client.zig");
         _ = @import("remote_hub.zig");
         _ = @import("remote_snapshot.zig");
+        _ = @import("appwindow/workspace_actions.zig");
         _ = @import("weixin/types.zig");
         _ = @import("weixin/state_store.zig");
         _ = @import("weixin/binding.zig");

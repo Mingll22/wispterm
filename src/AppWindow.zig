@@ -120,9 +120,11 @@ const flush_scheduler = @import("appwindow/flush_scheduler.zig");
 const resize_throttle = @import("appwindow/resize_throttle.zig");
 const surface_snapshots = @import("appwindow/surface_snapshots.zig");
 const remote_snapshot = @import("remote_snapshot.zig");
+const remote_workspace = @import("remote_workspace.zig");
 const send_to_chat = @import("send_to_chat.zig");
 const control_api = @import("appwindow/control_api.zig");
 const remote_sync = @import("appwindow/remote_sync.zig");
+const workspace_actions = @import("appwindow/workspace_actions.zig");
 const weixin_bridge = @import("appwindow/chatops_bridge.zig");
 const agent_requests = @import("appwindow/agent_requests.zig");
 const appwindow_ui_screenshot = @import("appwindow/ui_screenshot.zig");
@@ -426,7 +428,7 @@ pub fn deinit(self: *AppWindow) void {
         }
         if (restore_enabled and is_last_window) {
             persistOpenAiChatTabsToHistoryStore(self.allocator);
-            tab.dumpSessionToFile(self.allocator);
+            tab.dumpSessionToFile(self.allocator, g_appwindow_state.remote.workspace_emptied);
         }
     }
 
@@ -675,16 +677,17 @@ test "AppWindow: skill center tool manifest toggle preserves extra fields" {
     try std.testing.expect(enabled_value.bool);
 }
 
+pub fn restoreDirtyFlagsForTest(force_rebuild: bool, cells_valid: bool) void {
+    g_force_rebuild = force_rebuild;
+    g_cells_valid = cells_valid;
+}
+
 test "AppWindow: applyUiEffect maps repaint to dirty globals" {
     const previous_force_rebuild = g_force_rebuild;
     const previous_cells_valid = g_cells_valid;
-    defer {
-        g_force_rebuild = previous_force_rebuild;
-        g_cells_valid = previous_cells_valid;
-    }
+    defer restoreDirtyFlagsForTest(previous_force_rebuild, previous_cells_valid);
 
-    g_force_rebuild = false;
-    g_cells_valid = true;
+    restoreDirtyFlagsForTest(false, true);
 
     applyUiEffect(UiEffect.repaint);
 
@@ -695,13 +698,9 @@ test "AppWindow: applyUiEffect maps repaint to dirty globals" {
 test "AppWindow: applyUiEffect none leaves dirty globals unchanged" {
     const previous_force_rebuild = g_force_rebuild;
     const previous_cells_valid = g_cells_valid;
-    defer {
-        g_force_rebuild = previous_force_rebuild;
-        g_cells_valid = previous_cells_valid;
-    }
+    defer restoreDirtyFlagsForTest(previous_force_rebuild, previous_cells_valid);
 
-    g_force_rebuild = false;
-    g_cells_valid = true;
+    restoreDirtyFlagsForTest(false, true);
 
     applyUiEffect(UiEffect.none);
 
@@ -4780,7 +4779,7 @@ fn clearUiStateOnTabChange() void {
     overlays.resize.g_resize_overlay_suppress_until = std.time.milliTimestamp() + 100;
     syncVisibleFileExplorerForActiveTab(false);
     syncActiveSurfaceCaches();
-    requestImmediateLayoutResize();
+    if (activeTab() != null) requestImmediateLayoutResize() else _ = consumeImmediateLayoutResize();
     applyUiEffect(.repaint);
 }
 
@@ -5475,14 +5474,19 @@ fn syncFileExplorerToActiveTerminalSurface(force: bool) void {
 }
 
 pub fn closeTab(idx: usize) void {
+    if (tab.g_tab_count <= 1) return;
+    closeTabKeepingWindow(idx);
+}
+
+fn closeTabKeepingWindow(idx: usize) void {
     const allocator = g_allocator orelse return;
-    if (tab.g_tab_count <= 1 or idx >= tab.g_tab_count) return;
+    if (idx >= tab.g_tab_count) return;
     var closing_settings = false;
     if (tab.g_tabs[idx]) |closing| {
         closing_settings = closing.kind == .settings;
         if (closing.tmux_window_id != null) tmux_controller.forgetClosedTab(closing);
     }
-    tab.closeTab(idx, allocator);
+    tab.removeTab(idx, allocator);
     file_explorer.onTabClosed(idx);
     browser_panel.onTabClosed(idx);
     if (closing_settings) overlays.settingsPageDidClose();
@@ -6614,9 +6618,63 @@ fn remoteSyncHost() remote_sync.Host {
         .window = g_window,
         .state = &g_appwindow_state,
         .allocator = g_allocator,
+        .workspace_window = if (remote_sync.workspace_supported) currentNativeHandleBits() else null,
         .markUiDirty = markRemoteSyncUiDirty,
         .openDefaultAiAgentForRemote = openDefaultAiAgentForRemoteSync,
     };
+}
+
+fn applyRemoteWorkspaceAction(request: remote_workspace.Request) remote_workspace.Result {
+    const allocator = g_allocator orelse return .{ .status = .failed };
+    if (g_should_close or overlays.windowCloseConfirmVisible() or input.workspaceGestureActive()) return .{ .status = .stale };
+    return workspace_actions.apply(.{
+        .allocator = allocator,
+        .grid = .{ .cols = term_cols, .rows = term_rows },
+        .cell_width = font.cell_width,
+        .cell_height = font.cell_height,
+        .cursor_style = g_cursor_style,
+        .cursor_blink = g_cursor_blink,
+        .surfaceProtected = remoteWorkspaceSurfaceProtected,
+        .closeTab = closeRemoteWorkspaceTab,
+        .tabSpawned = clearUiStateOnTabChange,
+        .layoutChanged = remoteWorkspaceLayoutChanged,
+    }, request);
+}
+
+fn remoteWorkspaceSurfaceProtected(surface: *Surface) bool {
+    surface.render_state.mutex.lock();
+    defer surface.render_state.mutex.unlock();
+    return close_confirm.shouldConfirm(g_confirm_close_running_program, surfaceOnAltScreen(surface));
+}
+
+fn closeRemoteWorkspaceTab(index: usize) void {
+    const closing = tab.g_tabs[index].?;
+    var surfaces = closing.tree.surfaces();
+    while (surfaces.next()) |entry| html_server.stopForSurfaceId(&entry.surface.remote_id);
+    closeTabKeepingWindow(index);
+    if (activeTab()) |active| {
+        syncRemoteWorkspaceGeometry(active);
+    } else {
+        g_appwindow_state.remote.workspace_emptied = true;
+    }
+}
+
+fn remoteWorkspaceLayoutChanged(state: *TabState, closed_surface: ?remote_workspace.Id) void {
+    if (closed_surface) |*id| html_server.stopForSurfaceId(id);
+    syncRemoteWorkspaceGeometry(state);
+    if (state == activeTab()) {
+        handleActiveSurfaceChangeWithinTab();
+        requestImmediateLayoutResize();
+    } else {
+        applyUiEffect(.{ .needs_rebuild = true });
+    }
+}
+
+fn syncRemoteWorkspaceGeometry(state: *const TabState) void {
+    const allocator = g_allocator orelse return;
+    const size = g_appwindow_state.remote.window_size orelse return;
+    const area = split_layout.splitContentRect(size[0], size[1], currentTitlebarHeight(), leftPanelsWidth(), rightPanelsWidthForWindow(size[0]));
+    split_layout.updateRemoteWorkspaceGeometry(allocator, &state.tree, area);
 }
 
 // Allowed P3.1 shim: this callback owns App-window lookup under App.mutex and
@@ -7282,6 +7340,7 @@ fn installAgentToolHost(self: *AppWindow) void {
 fn installRemoteControlHandlers(self: *AppWindow) void {
     if (self.app.remote_hub) |hub| {
         hub.registerAiAgentOpener(self.app, openRemoteAiAgentForClient);
+        if (remote_sync.workspace_supported) hub.registerWorkspaceWakeup(window_backend.postWakeup);
     }
 }
 
@@ -7299,8 +7358,7 @@ fn uiFontSize(term_font_size: u32) u32 {
 }
 
 fn markAllRenderersDirty() void {
-    g_force_rebuild = true;
-    g_cells_valid = false;
+    applyUiEffect(.repaint);
     for (0..tab.g_tab_count) |ti| {
         if (tab.g_tabs[ti]) |tb| {
             var it = tb.tree.surfaces();
@@ -8216,6 +8274,9 @@ fn runMainLoop(self: *AppWindow) !void {
     defer if (g_quake_hotkey_registered) platform_global_hotkey.unregister(window_backend.nativeHandle(&backend_window), quick_terminal.HOTKEY_ID);
     installAgentToolHost(self);
     installRemoteControlHandlers(self);
+    defer if (self.app.remote_hub) |hub| {
+        if (remote_sync.workspace_supported) hub.detachWorkspaceWindow(window_backend.nativeHandleBits(&backend_window));
+    };
     installPlatformMenu();
     font.g_dpi = window_backend.dpi(&backend_window);
 
@@ -8841,8 +8902,12 @@ fn runMainLoop(self: *AppWindow) !void {
         const fb = window_backend.framebufferSize(win);
         const fb_width: c_int = fb.width;
         const fb_height: c_int = fb.height;
-        remote_sync.syncPendingGridLayout(remoteSyncHost(), allocator);
-        if (window_backend.isMinimized(win) or fb_width <= 0 or fb_height <= 0) {
+        const minimized = window_backend.isMinimized(win) or fb_width <= 0 or fb_height <= 0;
+        if (!minimized) noteRemoteTerminalWindowSize(fb_width, fb_height);
+        const remote_host = remoteSyncHost();
+        remote_sync.handleWorkspaceActions(remote_host, applyRemoteWorkspaceAction);
+        remote_sync.syncPendingLayout(remote_host, allocator);
+        if (minimized) {
             agent_requests.failPendingUiScreenshots(error.WindowUnavailable);
             const timeout_ms = render_gate.computeBlockTimeoutMs(.{
                 .visibility = .hidden,
@@ -8852,7 +8917,6 @@ fn runMainLoop(self: *AppWindow) !void {
             window_backend.pumpAppEvents(@as(f64, @floatFromInt(timeout_ms)) / 1000.0);
             continue;
         }
-        noteRemoteTerminalWindowSize(fb_width, fb_height);
         syncBackendSurfaceSize(fb_width, fb_height);
 
         const gate_now = std.time.milliTimestamp();

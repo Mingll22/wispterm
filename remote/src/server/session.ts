@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { WebSocket } from "ws";
+import { browserWorkspaceAction, hostWorkspaceResult } from "./workspace_protocol.js";
 import { browserTerminalMessage, hostTerminalMessage, type TerminalGridMessage } from "./terminal_control_protocol.js";
 
 export type RelayMessage = {
@@ -61,7 +62,7 @@ export function listSessions(): Array<{ key: string; connected: boolean }> {
 export class RemoteSession {
   readonly key: string;
   wispterm: WebSocket | null = null;
-  browsers = new Set<WebSocket>();
+  private browsers = new Map<string, WebSocket>();
   lastLayout: RelayMessage | null = null;
   private gridsSinceLayout = new Map<string, TerminalGridMessage>();
   private layoutListeners = new Set<() => void>();
@@ -239,6 +240,14 @@ export class RemoteSession {
         return;
       }
       if (message.type === "pong") return;
+      if (message.type === "workspace-action-result") {
+        const result = hostWorkspaceResult(message);
+        if (result) {
+          const { clientId, ...browserResult } = result;
+          this.sendBrowser(clientId, browserResult);
+        }
+        return;
+      }
       if (message.type === "open-ai-agent-result") {
         this.handleAiAgentOpenResult(message);
         return;
@@ -275,56 +284,75 @@ export class RemoteSession {
 
   attachBrowser(socket: WebSocket): void {
     const clientId = randomUUID();
-    this.browsers.add(socket);
+    this.browsers.set(clientId, socket);
     trackHeartbeat(socket);
-    safeSend(socket, { type: "terminal-control-client", clientId });
-    safeSend(socket, { type: "notice", message: "Browser paired; input enabled" });
+    this.sendBrowser(clientId, { type: "terminal-control-client", clientId });
+    this.sendBrowser(clientId, { type: "notice", message: "Browser paired; input enabled" });
     // The cached layout goes first and the peer status last: the client marks
     // the host connected when it sees a layout, so replaying a stale one
     // after the status made an offline host look online (and its input
     // "enabled") until the next real status change.
-    if (this.lastLayout) safeSend(socket, this.lastLayout);
-    for (const grid of this.gridsSinceLayout.values()) safeSend(socket, grid);
-    if (this.isWispTermConnected()) safeSend(socket, { type: "notice", message: "WispTerm connected" });
-    this.sendPeerStatus(socket);
+    if (this.lastLayout) this.sendBrowser(clientId, this.lastLayout);
+    for (const grid of this.gridsSinceLayout.values()) this.sendBrowser(clientId, grid);
+    if (this.isWispTermConnected()) this.sendBrowser(clientId, { type: "notice", message: "WispTerm connected" });
+    this.sendPeerStatus(clientId);
 
     socket.on("error", (err) => {
       console.warn(`[remote] browser websocket error: ${socketErrorMessage(err)}`);
-      this.browsers.delete(socket);
+      this.browsers.delete(clientId);
       terminateSocket(socket);
     });
 
     socket.on("message", (raw) => {
-      if (!this.browsers.has(socket)) return;
+      if (this.browsers.get(clientId) !== socket) return;
       const message = safeJson(raw.toString());
       if (!message) return;
       if (message.type === "ping") {
-        safeSend(socket, pongMessage(message));
+        this.sendBrowser(clientId, pongMessage(message));
         return;
       }
       if (message.type === "pong") return;
+      if (message.type === "workspace-action") {
+        const action = browserWorkspaceAction(message, clientId);
+        if (action && (!this.wispterm || !safeSend(this.wispterm, action))) {
+          this.sendBrowser(clientId, { type: "workspace-action-result", requestId: action.requestId, status: "offline" });
+        }
+        return;
+      }
       const terminalMessage = browserTerminalMessage(message, clientId);
       if (terminalMessage && this.wispterm) safeSend(this.wispterm, terminalMessage);
     });
 
     socket.on("close", () => {
-      this.browsers.delete(socket);
+      this.browsers.delete(clientId);
     });
   }
 
   broadcast(message: object): void {
     const payload = JSON.stringify(message);
-    for (const browser of this.browsers) {
-      try {
-        browser.send(payload);
-      } catch {
-        this.browsers.delete(browser);
-      }
+    for (const clientId of this.browsers.keys()) this.sendBrowserPayload(clientId, payload);
+  }
+
+  private sendBrowser(clientId: string, message: unknown): void {
+    this.sendBrowserPayload(clientId, JSON.stringify(message));
+  }
+
+  private sendBrowserPayload(clientId: string, payload: string): void {
+    const socket = this.browsers.get(clientId);
+    if (!socket) return;
+    if (socket.readyState !== 1) {
+      this.browsers.delete(clientId);
+      return;
+    }
+    try {
+      socket.send(payload);
+    } catch {
+      this.browsers.delete(clientId);
     }
   }
 
-  private sendPeerStatus(socket: WebSocket): void {
-    safeSend(socket, { type: "peer-status", wisptermConnected: this.isWispTermConnected() });
+  private sendPeerStatus(clientId: string): void {
+    this.sendBrowser(clientId, { type: "peer-status", wisptermConnected: this.isWispTermConnected() });
   }
 
   private broadcastPeerStatus(): void {

@@ -134,18 +134,16 @@ test "memory_digest_cursors: save and load roundtrip" {
 }
 
 test "memory_digest_cursors: missing or corrupt file loads empty" {
-    // Test missing file
-    var loaded = try Set.loadFromPath(std.testing.allocator, "/nonexistent/cursors.json");
-    defer loaded.deinit();
-    try std.testing.expectEqual(@as(usize, 0), loaded.entries.items.len);
-
-    // Test corrupt JSON
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(path);
     const file = try std.fs.path.join(std.testing.allocator, &.{ path, "cursors.json" });
     defer std.testing.allocator.free(file);
+
+    var loaded = try Set.loadFromPath(std.testing.allocator, file);
+    defer loaded.deinit();
+    try std.testing.expectEqual(@as(usize, 0), loaded.entries.items.len);
 
     try tmp.dir.writeFile(.{ .sub_path = "cursors.json", .data = "{\"schema_version\":1,\"entries\":[{brok" });
     var corrupt = try Set.loadFromPath(std.testing.allocator, file);

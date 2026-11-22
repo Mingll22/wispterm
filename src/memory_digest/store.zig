@@ -762,16 +762,16 @@ test "memory_digest_store: appendRunRecord rebuilds from a corrupt runs.json" {
 
 test "memory_digest_store: SummaryStore missing or corrupt file loads empty" {
     const allocator = std.testing.allocator;
-    var missing = try SummaryStore.loadFromPath(allocator, "/nonexistent/session_summaries.json");
-    defer missing.deinit();
-    try std.testing.expectEqual(@as(usize, 0), missing.records.items.len);
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const dir = try tmp.dir.realpathAlloc(allocator, ".");
     defer allocator.free(dir);
     const path = try std.fs.path.join(allocator, &.{ dir, "session_summaries.json" });
     defer allocator.free(path);
+
+    var missing = try SummaryStore.loadFromPath(allocator, path);
+    defer missing.deinit();
+    try std.testing.expectEqual(@as(usize, 0), missing.records.items.len);
 
     try tmp.dir.writeFile(.{ .sub_path = "session_summaries.json", .data = "{\"schema_version\":1,\"records\":[{brok" });
     var corrupt = try SummaryStore.loadFromPath(allocator, path);

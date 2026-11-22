@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { browserWorkspaceAction, hostWorkspaceResult } from "./server/workspace_protocol.js";
 import { browserTerminalMessage, hostTerminalMessage, type TerminalGridMessage } from "./server/terminal_control_protocol.js";
 
 type Env = {
@@ -29,7 +30,7 @@ const SESSION_TTL_SECONDS = 24 * 60 * 60;
 
 export class RemoteSession extends DurableObject<Env> {
   private wispterm: WebSocket | null = null;
-  private browsers = new Set<WebSocket>();
+  private browsers = new Map<string, WebSocket>();
   private lastLayout: RelayMessage | null = null;
   private gridsSinceLayout = new Map<string, TerminalGridMessage>();
 
@@ -75,6 +76,14 @@ export class RemoteSession extends DurableObject<Env> {
       }
       if (message.type === "pong") return;
 
+      if (message.type === "workspace-action-result") {
+        const result = hostWorkspaceResult(message);
+        if (result) {
+          const { clientId, ...browserResult } = result;
+          this.sendBrowser(clientId, browserResult);
+        }
+        return;
+      }
       if (message.type === "output" && typeof message.data === "string") {
         this.broadcast({ type: "output", data: message.data });
       } else if (message.type === "output-bytes" && typeof message.data === "string") {
@@ -107,53 +116,82 @@ export class RemoteSession extends DurableObject<Env> {
 
   private attachBrowser(socket: WebSocket): void {
     const clientId = crypto.randomUUID();
-    this.browsers.add(socket);
-    socket.send(JSON.stringify({ type: "terminal-control-client", clientId }));
-    socket.send(JSON.stringify({ type: "notice", message: "Browser paired; input enabled" }));
+    this.browsers.set(clientId, socket);
+    this.sendBrowser(clientId, { type: "terminal-control-client", clientId });
+    this.sendBrowser(clientId, { type: "notice", message: "Browser paired; input enabled" });
     // Cached layout first, peer status last (see server/session.ts): a stale
     // layout must not leave an offline host looking connected.
-    if (this.lastLayout) socket.send(JSON.stringify(this.lastLayout));
-    for (const grid of this.gridsSinceLayout.values()) socket.send(JSON.stringify(grid));
-    if (this.wispterm) socket.send(JSON.stringify({ type: "notice", message: "WispTerm connected" }));
-    this.sendPeerStatus(socket);
+    if (this.lastLayout) this.sendBrowser(clientId, this.lastLayout);
+    for (const grid of this.gridsSinceLayout.values()) this.sendBrowser(clientId, grid);
+    if (this.wispterm) this.sendBrowser(clientId, { type: "notice", message: "WispTerm connected" });
+    this.sendPeerStatus(clientId);
 
     socket.addEventListener("message", (event) => {
-      if (!this.browsers.has(socket) || typeof event.data !== "string") return;
+      if (this.browsers.get(clientId) !== socket || typeof event.data !== "string") return;
       const message = safeJson(event.data);
       if (!message) return;
 
       if (message.type === "ping") {
-        try { socket.send(JSON.stringify(pongMessage(message))); } catch { /* ignore */ }
+        this.sendBrowser(clientId, pongMessage(message));
         return;
       }
       if (message.type === "pong") return;
 
+      if (message.type === "workspace-action") {
+        const action = browserWorkspaceAction(message, clientId);
+        if (action && (!this.wispterm || !safeSend(this.wispterm, action))) {
+          this.sendBrowser(clientId, { type: "workspace-action-result", requestId: action.requestId, status: "offline" });
+        }
+        return;
+      }
       const terminalMessage = browserTerminalMessage(message, clientId);
       if (terminalMessage && this.wispterm) this.wispterm.send(JSON.stringify(terminalMessage));
     });
 
     socket.addEventListener("close", () => {
-      this.browsers.delete(socket);
+      this.browsers.delete(clientId);
     });
   }
 
   private broadcast(message: object): void {
-    const data = JSON.stringify(message);
-    for (const browser of this.browsers) {
-      try {
-        browser.send(data);
-      } catch {
-        this.browsers.delete(browser);
-      }
+    const payload = JSON.stringify(message);
+    for (const clientId of this.browsers.keys()) this.sendBrowserPayload(clientId, payload);
+  }
+
+  private sendBrowser(clientId: string, message: unknown): void {
+    this.sendBrowserPayload(clientId, JSON.stringify(message));
+  }
+
+  private sendBrowserPayload(clientId: string, payload: string): void {
+    const socket = this.browsers.get(clientId);
+    if (!socket) return;
+    if (socket.readyState !== 1) {
+      this.browsers.delete(clientId);
+      return;
+    }
+    try {
+      socket.send(payload);
+    } catch {
+      this.browsers.delete(clientId);
     }
   }
 
-  private sendPeerStatus(socket: WebSocket): void {
-    socket.send(JSON.stringify({ type: "peer-status", wisptermConnected: this.wispterm !== null }));
+  private sendPeerStatus(clientId: string): void {
+    this.sendBrowser(clientId, { type: "peer-status", wisptermConnected: this.wispterm !== null });
   }
 
   private broadcastPeerStatus(): void {
     this.broadcast({ type: "peer-status", wisptermConnected: this.wispterm !== null });
+  }
+}
+
+function safeSend(socket: WebSocket, message: unknown): boolean {
+  if (socket.readyState !== 1) return false;
+  try {
+    socket.send(JSON.stringify(message));
+    return true;
+  } catch {
+    return false;
   }
 }
 

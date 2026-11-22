@@ -10,6 +10,8 @@ pub const AiInputSink = struct {
 
 pub const State = struct {
     layout_last_ms: i64 = 0,
+    layout_pending: bool = false,
+    workspace_emptied: bool = false,
     window_size: ?[2]i32 = null,
     ai_sinks: [MAX_REMOTE_AI_SINKS]AiInputSink = [_]AiInputSink{.{}} ** MAX_REMOTE_AI_SINKS,
     last_transfer_notification_seq: u64 = 0,
@@ -22,6 +24,7 @@ pub const State = struct {
 
     pub fn forceNextLayout(self: *State) void {
         self.layout_last_ms = 0;
+        self.layout_pending = true;
     }
 
     pub fn observeWindowSize(self: *State, width: i32, height: i32) bool {

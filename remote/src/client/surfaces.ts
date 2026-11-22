@@ -1,4 +1,5 @@
 import { tr } from "./i18n";
+import { iconClose } from "./icons";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 
@@ -35,6 +36,8 @@ import { getTerminalPalette, subscribeToTheme } from "./theme";
 import { REMOTE_TERMINAL_SCROLLBACK } from "./terminal_options";
 import { mapScaledTerminalPointer } from "./terminal_pointer";
 import { supportedTerminalGrid, terminalControl, type TerminalControlTarget } from "./terminal_control";
+import { workspaceGeometry } from "./workspace_layout";
+import { positionWorkspacePane } from "./workspace_panels";
 import {
   shouldBufferLiveOutputForInitialSnapshot,
   shouldFlushBufferedOutput,
@@ -90,13 +93,28 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
   scrollbar.appendChild(scrollbarThumb);
   const control = document.createElement("header");
   control.className = "terminal-lease";
+  control.tabIndex = -1;
   control.hidden = true;
   const controlTitle = document.createElement("span");
   controlTitle.className = "terminal-lease-title";
   const controlButton = document.createElement("button");
   controlButton.type = "button";
+  const paneDragHandle = document.createElement("button");
+  paneDragHandle.type = "button";
+  paneDragHandle.className = "pane-drag-handle";
+  paneDragHandle.hidden = true;
+  const paneCloseButton = document.createElement("button");
+  paneCloseButton.type = "button";
+  paneCloseButton.className = "secondary-button pane-close";
+  paneCloseButton.hidden = true;
+  paneCloseButton.innerHTML = iconClose();
+  const paneActions = document.createElement("div");
+  paneActions.className = "terminal-pane-actions";
+  paneActions.appendChild(controlButton);
+  paneActions.appendChild(paneCloseButton);
   control.appendChild(controlTitle);
-  control.appendChild(controlButton);
+  control.appendChild(paneDragHandle);
+  control.appendChild(paneActions);
   control.addEventListener("pointerdown", (event) => event.stopPropagation());
   control.addEventListener("click", (event) => event.stopPropagation());
   controlButton.addEventListener("click", () => {
@@ -141,6 +159,8 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     control,
     controlTitle,
     controlButton,
+    paneDragHandle,
+    paneCloseButton,
     scrollbar,
     scrollbarThumb,
     aiContainer: null,
@@ -191,9 +211,10 @@ export function renderRemotePanels(): void {
   if (!panelsRoot) return;
 
   const tab = currentTab();
+  const paneMode = isMobileRemoteShell() ? state.mobilePanelMode : state.desktopPanelMode;
   const selectedSurface = tab?.surfaces.find((surface) => surface.id === state.selectedSurfaceId) ?? tab?.surfaces[0];
   const workspace = panelsRoot.closest(".workspace");
-  const titleInPane = selectedSurface?.terminalControl === true && selectedSurface.readOnly !== true;
+  const titleInPane = Boolean(selectedSurface && (tab?.workspace || (selectedSurface.terminalControl && !selectedSurface.readOnly)));
   workspace?.toggleAttribute("data-context-title", Boolean(selectedSurface && !titleInPane));
   workspace?.toggleAttribute("data-title-in-pane", titleInPane);
   workspace?.toggleAttribute("data-panel-selector", (tab?.surfaces.length ?? 0) > 1 && state.desktopPanelMode === "single");
@@ -227,20 +248,24 @@ export function renderRemotePanels(): void {
     mobileTitleRoot.title = tabTitle;
   }
   panelsRoot.className = "panels-stage";
-  panelsRoot.dataset.mobileMode = "single";
+  panelsRoot.dataset.mobileMode = state.mobilePanelMode;
   panelsRoot.dataset.desktopMode = state.desktopPanelMode;
   panelsRoot.querySelectorAll(".empty-state").forEach((node) => node.remove());
   const visible = new Set(tab.surfaces.map((surface) => surface.id));
+  const panePositions = tab.workspace
+    ? new Map(workspaceGeometry(tab.workspace.tree).panes.map((pane) => [pane.surfaceId, pane]))
+    : null;
 
   for (const surface of tab.surfaces) {
     const view = ensureSurfaceView(surface.id);
     const selected = surface.id === state.selectedSurfaceId;
     view.panel.className = `remote-panel${selected ? " selected" : ""}${surface.kind === "ai_chat" ? " ai-chat-panel" : ""}`;
-    view.panel.style.left = `${(surface.x ?? 0) * 100}%`;
-    view.panel.style.top = `${(surface.y ?? 0) * 100}%`;
-    view.panel.style.width = `${Math.max(0.05, surface.w ?? 1) * 100}%`;
-    view.panel.style.height = `${Math.max(0.05, surface.h ?? 1) * 100}%`;
-    view.panel.dataset.surfaceId = surface.id;
+    view.panel.setAttribute("aria-label", surface.title?.trim() || tr("Terminal panel", "终端面板"));
+    positionWorkspacePane(view.panel, panePositions?.get(surface.id) ?? {
+      x: surface.x ?? 0, y: surface.y ?? 0, width: Math.max(0.05, surface.w ?? 1), height: Math.max(0.05, surface.h ?? 1),
+    });
+    view.paneCloseButton.hidden = !tab.workspace;
+    view.paneDragHandle.hidden = !tab.workspace || tab.surfaces.length < 2 || paneMode === "single";
     applySurfaceInputPolicy(view, surface);
     const nextRemoteCols = validPositiveInteger(surface.cols);
     const nextRemoteRows = validPositiveInteger(surface.rows);
@@ -395,6 +420,7 @@ function scheduleControlMeasurement(): void {
   controlMeasurementQueued = true;
   requestAnimationFrame(() => {
     controlMeasurementQueued = false;
+    if (document.getElementById("remote-panels")?.hasAttribute("data-split-preview")) return;
     const targets: TerminalControlTarget[] = [];
     for (const surface of currentTab()?.surfaces ?? []) {
       if (!surface.terminalControl || surface.readOnly) continue;
@@ -625,18 +651,26 @@ function applySurfaceInputPolicy(view: SurfaceView, surface: LayoutSurface | und
     surface?.kind === "ai_chat" || surface?.readOnly === true || (supportsLease && !held) || isViewModeInputBlocked();
   syncTerminalNativeInputGuard(view);
 
-  const showLease = supportsLease;
-  view.control.hidden = !showLease;
-  view.mount.toggleAttribute("data-terminal-lease", showLease);
-  if (!showLease || !surface) return;
-  const reason = terminalControl.reason(surface.id);
-  const connected = terminalControl.isAvailable();
-  const action = held ? tr("Release", "归还") : tr("Take control", "接管");
+  const showHeader = supportsLease || !view.paneCloseButton.hidden;
+  view.control.hidden = !showHeader;
+  view.controlButton.hidden = !supportsLease;
+  view.mount.toggleAttribute("data-terminal-lease", showHeader);
+  if (!showHeader || !surface) return;
   const title = surface.title?.trim() || tr("Terminal", "终端");
   if (view.controlTitle.textContent !== title) {
     view.controlTitle.textContent = title;
     view.controlTitle.title = title;
+    const close = tr(`Close ${title}`, `关闭「${title}」`);
+    view.paneCloseButton.title = close;
+    view.paneCloseButton.setAttribute("aria-label", close);
+    const move = tr(`Drag ${title} to rearrange splits`, `拖动「${title}」调整分屏位置`);
+    view.paneDragHandle.title = move;
+    view.paneDragHandle.setAttribute("aria-label", move);
   }
+  if (!supportsLease) return;
+  const reason = terminalControl.reason(surface.id);
+  const connected = terminalControl.isAvailable();
+  const action = held ? tr("Release", "归还") : tr("Take control", "接管");
   if (view.controlButton.textContent !== action) view.controlButton.textContent = action;
   view.controlButton.classList.toggle("secondary-button", held);
   view.controlButton.disabled = !connected || reason === "unsupported";

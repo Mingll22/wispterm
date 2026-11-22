@@ -1,10 +1,11 @@
 import { normalizeMobileVisualZoom } from "./mobile_visual_zoom";
-import type { DesktopPanelMode, MobileVisualZoom, ThemeMode } from "./types";
+import type { PanelMode, MobileVisualZoom, ThemeMode } from "./types";
 
 const SESSION_KEY_STORAGE_KEY = "wispterm.remote.sessionKey";
 const THEME_STORAGE_KEY = "wispterm.remote.theme";
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "wispterm.remote.sidebarCollapsed";
 const DESKTOP_PANEL_MODE_STORAGE_KEY = "wispterm.remote.desktopPanelMode";
+const MOBILE_PANEL_MODE_STORAGE_KEY = "wispterm.remote.mobilePanelMode";
 const MOBILE_VISUAL_ZOOM_STORAGE_KEY = "wispterm.remote.mobileVisualZoom";
 
 export function readSavedSessionKey(): string {
@@ -59,19 +60,27 @@ export function saveSidebarCollapsed(collapsed: boolean): void {
   }
 }
 
-export function readSavedDesktopPanelMode(): DesktopPanelMode {
+export function readSavedDesktopPanelMode(): PanelMode {
+  return readSavedPanelMode(DESKTOP_PANEL_MODE_STORAGE_KEY, "layout");
+}
+
+export function readSavedMobilePanelMode(): PanelMode {
+  return readSavedPanelMode(MOBILE_PANEL_MODE_STORAGE_KEY, "single");
+}
+
+function readSavedPanelMode(key: string, defaultMode: PanelMode): PanelMode {
   try {
-    const raw = localStorage.getItem(DESKTOP_PANEL_MODE_STORAGE_KEY);
+    const raw = localStorage.getItem(key);
     if (raw === "layout" || raw === "single") return raw;
   } catch {
     // Storage may be unavailable in restricted browser contexts.
   }
-  return "layout";
+  return defaultMode;
 }
 
-export function saveDesktopPanelMode(mode: DesktopPanelMode): void {
+export function savePanelMode(mode: PanelMode, mobile: boolean): void {
   try {
-    localStorage.setItem(DESKTOP_PANEL_MODE_STORAGE_KEY, mode);
+    localStorage.setItem(mobile ? MOBILE_PANEL_MODE_STORAGE_KEY : DESKTOP_PANEL_MODE_STORAGE_KEY, mode);
   } catch {
     // Storage may be unavailable in restricted browser contexts.
   }

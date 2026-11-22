@@ -10,20 +10,24 @@ const appwindow_state = @import("state.zig");
 const active_tab_state = @import("active_tab.zig");
 const remote = @import("../remote_hub.zig");
 const remote_snapshot = @import("../remote_snapshot.zig");
+const remote_workspace = @import("../remote_workspace.zig");
 const renderer = @import("../renderer.zig");
 const surface_snapshots = @import("surface_snapshots.zig");
 const live_transcript = @import("../terminal_agents/live_transcript.zig");
 const tab = @import("tab.zig");
 const thread_message = @import("thread_message.zig");
 const window_backend = @import("../platform/window_backend.zig");
+const workspace_actions = @import("workspace_actions.zig");
 
 pub const AiAgentOpenStatus = remote.AiAgentOpenStatus;
+pub const workspace_supported = @import("../platform/remote_transport.zig").supported;
 
 pub const Host = struct {
     hub: ?*remote.Hub,
     window: ?*window_backend.Window,
     state: *appwindow_state.State,
     allocator: ?std.mem.Allocator = null,
+    workspace_window: ?usize = null,
     markUiDirty: *const fn () void,
     openDefaultAiAgentForRemote: *const fn () remote.AiAgentOpenStatus,
 };
@@ -46,13 +50,29 @@ pub fn syncLayout(host: Host, allocator: std.mem.Allocator) void {
     const grid_epoch = hub.currentGridEpoch();
     const layout = buildLayoutJson(host, allocator) catch return;
     defer allocator.free(layout);
-    if (!hub.sendLayoutIfCurrent(layout, grid_epoch)) host.state.remote.forceNextLayout();
+    if (hub.sendLayoutIfCurrent(layout, grid_epoch, host.workspace_window)) {
+        host.state.remote.layout_pending = false;
+    } else {
+        host.state.remote.forceNextLayout();
+    }
 }
 
-/// Background or minimized tabs can commit a grid without needing a frame.
-pub fn syncPendingGridLayout(host: Host, allocator: std.mem.Allocator) void {
+/// Background or minimized tabs can change their grid or workspace without a frame.
+pub fn syncPendingLayout(host: Host, allocator: std.mem.Allocator) void {
     const hub = host.hub orelse return;
-    if (hub.layoutNeedsGridRefresh()) syncLayout(host, allocator);
+    if (host.state.remote.layout_pending or hub.layoutNeedsGridRefresh()) syncLayout(host, allocator);
+}
+
+pub fn handleWorkspaceActions(host: Host, apply: *const fn (remote_workspace.Request) remote_workspace.Result) void {
+    const hub = host.hub orelse return;
+    const window = host.workspace_window orelse return;
+    for (0..remote.max_workspace_actions) |_| {
+        const request = hub.takeWorkspaceAction(window) orelse return;
+        defer request.deinit();
+        const result = apply(request.value);
+        hub.sendWorkspaceActionResult(request.value, result);
+        if (result.status == .ok or result.status == .stale) host.state.remote.forceNextLayout();
+    }
 }
 
 pub fn buildLayoutJson(host: Host, allocator: std.mem.Allocator) ![]u8 {
@@ -65,6 +85,7 @@ pub fn buildLayoutJson(host: Host, allocator: std.mem.Allocator) ![]u8 {
 fn appendLayoutJson(host: Host, allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
     try out.appendSlice(allocator, "{\"type\":\"layout\",\"activeTab\":");
     try out.print(allocator, "{d}", .{active_tab_state.g_active_tab});
+    if (host.workspace_window != null) try out.appendSlice(allocator, ",\"workspaceActions\":true");
     try out.appendSlice(allocator, ",\"tabs\":[");
 
     var wrote_tab = false;
@@ -94,6 +115,7 @@ fn appendLayoutJson(host: Host, allocator: std.mem.Allocator, out: *std.ArrayLis
         }
         try out.append(allocator, '"');
         try surface_snapshots.appendAgentDetectionJson(allocator, out, focused_surface);
+        if (host.workspace_window != null) try workspace_actions.appendLayoutFields(allocator, out, tab_state);
         try out.appendSlice(allocator, ",\"surfaces\":[");
 
         var spatial = tab_state.tree.spatial(allocator) catch null;

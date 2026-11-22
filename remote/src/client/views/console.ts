@@ -1,13 +1,13 @@
 import { getLocale, isRemoteLocale, setLocale, tr } from "../i18n";
 import type { ConnectionStatus, LayoutSurface, MobileInputMode, MobileVisualZoom } from "../types";
-import { iconClose, iconMenu, themeToggleMarkup } from "../icons";
+import { iconAdd, iconClose, iconDelete, iconMenu, themeToggleMarkup } from "../icons";
 import { bindThemeToggleButtons } from "../theme";
 import { activeSurfaceIdForInput, currentTab, state } from "../state";
 import {
   clearSessionKey,
   maskSessionKey,
   readSavedSessionKey,
-  saveDesktopPanelMode,
+  savePanelMode,
   saveMobileVisualZoom,
   saveSidebarCollapsed,
 } from "../storage";
@@ -49,6 +49,7 @@ import {
   type WeixinSettingsResponse,
 } from "../weixin";
 import { connectionHeaderLabel, connectionStatusOffline } from "../connection_status";
+import { bindWorkspaceControls } from "../workspace_controls";
 
 let viewportRefitBound = false;
 let mobileSurfaceSelectorObserver: ResizeObserver | null = null;
@@ -62,6 +63,7 @@ let sidebarPage: SidebarPage = "tabs";
 const LANGUAGE_SETTINGS_RETURN_KEY = "wispterm.remote.languageSettingsReturn";
 let currentConnectionStatus: ConnectionStatus = connectionStatusOffline(tr("Offline", "未连接"));
 let statusLatencyHideTimer: ReturnType<typeof setTimeout> | null = null;
+let workspaceControls: ReturnType<typeof bindWorkspaceControls> | null = null;
 
 export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   cleanupWeixinPanel();
@@ -97,6 +99,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
 
         <div class="sidebar-main">
           <div class="sidebar-page${sidebarPage === "tabs" ? " active" : ""}" data-sidebar-page="tabs">
+            <button type="button" class="tab-chip workspace-new-tab" id="new-remote-tab" hidden>${iconAdd()}${tr("New tab", "新建标签")}</button>
             <div id="remote-tabs" class="remote-tabs empty">${tr("Connect WispTerm to see its tabs", "连接桌面端后显示标签页")}</div>
           </div>
 
@@ -145,15 +148,15 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
               </fieldset>
               <output class="language-error" id="language-error" aria-live="polite"></output>
             </div>
-            <div class="panel" id="desktop-panel-mode">
+            <div class="panel" id="workspace-panel-mode">
               <fieldset class="setting-options">
-                <legend>${tr("Desktop layout", "桌面布局")}</legend>
+                <legend>${tr("Split layout", "分屏布局")}</legend>
                 <label>
-                  <input type="radio" name="desktop-layout" value="layout"${state.desktopPanelMode === "layout" ? " checked" : ""} />
+                  <input type="radio" name="split-layout" value="layout" />
                   <span>${tr("Mirror layout", "镜像布局")}</span>
                 </label>
                 <label>
-                  <input type="radio" name="desktop-layout" value="single"${state.desktopPanelMode === "single" ? " checked" : ""} />
+                  <input type="radio" name="split-layout" value="single" />
                   <span>${tr("Single panel", "单面板")}</span>
                 </label>
               </fieldset>
@@ -230,6 +233,10 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
             </div>
           </div>
           <div class="mobile-chrome-controls">
+            <div class="workspace-tab-actions" id="mobile-workspace-actions" role="group" aria-label="${tr("Selected tab actions", "当前标签操作")}" hidden>
+              <button type="button" class="icon-button tab-add-pane" id="mobile-add-pane">${iconAdd()}</button>
+              <button type="button" class="icon-button tab-delete" id="mobile-delete-tab">${iconDelete()}</button>
+            </div>
             <div class="mobile-connection">
               ${themeToggleMarkup("mobile-theme-toggle")}
               <button type="button" class="status-pip" id="mobile-status-pip" data-state="offline" aria-label="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}" title="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}">${tr("Offline", "未连接")}</button>
@@ -257,14 +264,39 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
               <h2 id="connection-empty-title">${tr("Connect WispTerm", "连接桌面终端")}</h2>
               <p id="connection-empty-help">${tr("Use the session key from the WispTerm desktop app.", "使用桌面端 WispTerm 的会话密钥。")}</p>
               <button type="button" id="open-connection">${tr("Open connection", "打开连接")}</button>
+              <button type="button" id="empty-new-remote-tab" hidden>${tr("New tab", "新建标签")}</button>
             </div>
           </div>
+          <output class="workspace-action-status" id="workspace-action-status" aria-live="polite"></output>
         </section>
       </section>
+      <dialog class="glass-surface workspace-close-dialog" id="close-remote-tab" aria-labelledby="close-remote-tab-title" aria-describedby="close-remote-tab-message">
+        <form method="dialog">
+          <h2 id="close-remote-tab-title">${tr("Delete tab", "删除标签")}</h2>
+          <p id="close-remote-tab-message"></p>
+          <div class="form-actions">
+            <button class="secondary-button" value="cancel" autofocus>${tr("Cancel", "取消")}</button>
+            <button class="workspace-confirm-close" value="close">${tr("Delete tab", "删除标签")}</button>
+          </div>
+        </form>
+      </dialog>
       ${renderVirtualKeyboardMarkup()}
       ${renderMobileTextInputMarkup()}
     </section>
   `;
+
+  workspaceControls = bindWorkspaceControls(app, {
+    selectTab: (index) => {
+      state.selectedTabIndex = index;
+      const tab = currentTab();
+      state.selectedSurfaceId = tab?.focusedSurfaceId || tab?.surfaces[0]?.id || null;
+      renderRemoteWorkspace();
+      applyRemoteTabSelectionSidebarAction();
+    },
+    selectPane,
+    created: applyRemoteTabSelectionSidebarAction,
+    previewEnded: refitAllSurfaces,
+  });
 
   document.querySelector<HTMLButtonElement>("#logout-button")?.addEventListener("click", async () => {
     cleanupWeixinPanel();
@@ -338,7 +370,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
     else setSidebarCollapsed(false);
     document.querySelector<HTMLInputElement>("#remote-language input:checked")?.focus();
   }
-  bindDesktopPanelMode();
+  bindWorkspacePanelMode();
   bindWeixinPanel();
   bindStatusLatencyDisclosure();
   setStatus(currentConnectionStatus);
@@ -390,70 +422,13 @@ function renderConnectionLink(
   element.textContent = labels[state];
 }
 
-export function renderRemoteTabs(): void {
-  const tabsRoot = document.querySelector<HTMLDivElement>("#remote-tabs");
-  if (!tabsRoot) return;
-
-  const layout = state.layoutState;
-  if (!layout || layout.tabs.length === 0) {
-    tabsRoot.className = "remote-tabs empty";
-    tabsRoot.textContent = tr("Connect WispTerm to see its tabs", "连接桌面端后显示标签页");
-    return;
-  }
-
-  if (tabsRoot.classList.contains("empty")) tabsRoot.replaceChildren();
-  tabsRoot.className = "remote-tabs";
-  const existing = new Map(
-    Array.from(tabsRoot.querySelectorAll<HTMLButtonElement>("[data-tab-index]"))
-      .map((button) => [Number(button.dataset.tabIndex), button]),
-  );
-
-  layout.tabs.forEach((tab, position) => {
-    let button = existing.get(tab.index);
-    if (!button) {
-      button = document.createElement("button");
-      button.type = "button";
-      button.className = "tab-chip";
-      button.dataset.tabIndex = String(tab.index);
-      button.innerHTML = '<span class="tab-chip-label"></span><span class="tab-chip-count"></span>';
-      button.addEventListener("click", () => {
-        state.selectedTabIndex = tab.index;
-        const activeTab = currentTab();
-        state.selectedSurfaceId =
-          activeTab?.focusedSurfaceId ?? activeTab?.surfaces[0]?.id ?? state.selectedSurfaceId;
-        renderRemoteWorkspace();
-        applyRemoteTabSelectionSidebarAction();
-      });
-    }
-    existing.delete(tab.index);
-
-    const active = tab.index === state.selectedTabIndex;
-    const title = tab.title || tr(`Tab ${tab.index + 1}`, `标签页 ${tab.index + 1}`);
-    const count = tab.surfaces.length;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
-    button.title = title;
-    const label = button.querySelector<HTMLElement>(".tab-chip-label");
-    if (label && label.textContent !== title) label.textContent = title;
-    const countLabel = button.querySelector<HTMLElement>(".tab-chip-count");
-    if (countLabel) {
-      countLabel.hidden = count <= 1;
-      countLabel.title = tr("Panels", "面板数量");
-      if (countLabel.textContent !== String(count)) countLabel.textContent = String(count);
-    }
-    const before = tabsRoot.children[position] ?? null;
-    if (before !== button) tabsRoot.insertBefore(button, before);
-  });
-  for (const button of existing.values()) button.remove();
-}
-
 function applyRemoteTabSelectionSidebarAction(): void {
   const action = remoteTabSelectionSidebarAction(isMobileRemoteShell());
   if (action === "close-drawer") setDrawerOpen(false);
 }
 
 export function renderRemoteWorkspace(): void {
-  renderRemoteTabs();
+  workspaceControls?.renderTabs();
   renderRemotePanels();
   renderSurfaceStrip();
   updateMobileSurfaceMode();
@@ -465,7 +440,7 @@ function renderSurfaceStrip(): void {
   const tab = currentTab();
   const surfaces = tab?.surfaces ?? [];
   renderDesktopSurfaceStrip(strip, surfaces);
-  renderMobileSurfaceSelector(surfaces);
+  renderMobileSurfaceSelector(state.mobilePanelMode === "single" ? surfaces : []);
 }
 
 function renderDesktopSurfaceStrip(strip: HTMLDivElement | null, surfaces: LayoutSurface[]): void {
@@ -538,12 +513,16 @@ function renderMobileSurfaceSelector(surfaces: LayoutSurface[]): void {
 function bindSurfaceButtons(root: HTMLElement): void {
   root.querySelectorAll<HTMLButtonElement>("[data-surface-id]").forEach((button) => {
     button.addEventListener("click", () => {
-      state.selectedSurfaceId = button.dataset.surfaceId ?? state.selectedSurfaceId;
-      setMobileSurfaceMenuOpen(false);
-      renderRemoteWorkspace();
-      focusAndFitSelectedSurface();
+      if (button.dataset.surfaceId) selectPane(button.dataset.surfaceId);
     });
   });
+}
+
+function selectPane(surfaceId: string): void {
+  state.selectedSurfaceId = surfaceId;
+  setMobileSurfaceMenuOpen(false);
+  renderRemoteWorkspace();
+  focusAndFitSelectedSurface();
 }
 
 function setMobileSurfaceMenuOpen(open: boolean): void {
@@ -602,6 +581,7 @@ export function updateInputUi(): void {
   renderConnectionEmpty();
   updateSurfaceCursors();
   updateAiChatControls();
+  workspaceControls?.update();
 }
 
 function renderConnectionEmpty(): void {
@@ -626,8 +606,10 @@ function renderConnectionEmpty(): void {
     }
   }
   if (help) {
-    help.hidden = desktopConnected;
-    if (!desktopConnected) {
+    help.hidden = desktopConnected && !state.layoutState?.workspaceActions;
+    if (desktopConnected) {
+      help.textContent = tr("Create a tab to open the default terminal.", "新建标签以打开默认终端。");
+    } else {
       help.textContent = state.activeSessionKey && currentConnectionStatus.kind === "offline"
         ? tr("Check the session key or enable remote access in the desktop app.", "检查会话密钥，或确认桌面端已开启远程访问。")
         : tr("Use the session key from the WispTerm desktop app.", "使用桌面端 WispTerm 的会话密钥。");
@@ -839,21 +821,29 @@ function setSidebarPage(page: SidebarPage): void {
   });
 }
 
-function bindDesktopPanelMode(): void {
-  document.querySelector("#desktop-panel-mode")?.addEventListener("change", (event) => {
-    if (event.target instanceof HTMLInputElement) setDesktopPanelMode(event.target.value);
+function bindWorkspacePanelMode(): void {
+  document.querySelector("#workspace-panel-mode")?.addEventListener("change", (event) => {
+    if (!(event.target instanceof HTMLInputElement)) return;
+    const value = event.target.value;
+    if (value !== "layout" && value !== "single") return;
+    const mobile = isMobileRemoteShell();
+    if (mobile) state.mobilePanelMode = value;
+    else state.desktopPanelMode = value;
+    savePanelMode(value, mobile);
+    syncWorkspacePanelMode();
+    renderRemoteWorkspace();
+    refitAllSurfaces();
   });
+  syncWorkspacePanelMode();
 }
 
-function setDesktopPanelMode(value: string): void {
-  if (value !== "layout" && value !== "single") return;
-  if (state.desktopPanelMode === value) return;
-  state.desktopPanelMode = value;
-  saveDesktopPanelMode(value);
+function syncWorkspacePanelMode(): void {
   const shell = document.querySelector<HTMLElement>(".console-shell");
-  if (shell) shell.dataset.desktopPanelMode = value;
-  renderRemoteWorkspace();
-  refitAllSurfaces();
+  if (shell) shell.dataset.desktopPanelMode = state.desktopPanelMode;
+  const mode = isMobileRemoteShell() ? state.mobilePanelMode : state.desktopPanelMode;
+  document.querySelectorAll<HTMLInputElement>("#workspace-panel-mode input").forEach((input) => {
+    input.checked = input.value === mode;
+  });
 }
 
 function bindViewportRefit(): void {
@@ -867,7 +857,11 @@ function bindViewportRefit(): void {
   viewportRefitBound = true;
 
   window.addEventListener("resize", refit, { passive: true });
-  window.matchMedia(MOBILE_REMOTE_MEDIA_QUERY).addEventListener("change", syncSurfaceVisualZooms);
+  window.matchMedia(MOBILE_REMOTE_MEDIA_QUERY).addEventListener("change", () => {
+    syncWorkspacePanelMode();
+    renderRemoteWorkspace();
+    syncSurfaceVisualZooms();
+  });
   window.visualViewport?.addEventListener("resize", refit);
   window.visualViewport?.addEventListener("scroll", refit);
 }

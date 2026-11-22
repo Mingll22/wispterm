@@ -1,6 +1,7 @@
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import type { CanvasPoint, CanvasSize } from "./mobile_canvas";
+import type { WorkspaceTree } from "./workspace_layout";
 
 export type MeResponse = { authenticated: boolean; username?: string };
 
@@ -29,9 +30,10 @@ export type LayoutTab = {
   title?: string;
   focusedSurfaceId?: string;
   surfaces: LayoutSurface[];
+  workspace?: { tabId: string; layoutRevision: string; tree: WorkspaceTree };
 };
 
-export type LayoutState = { activeTab: number; tabs: LayoutTab[] };
+export type LayoutState = { activeTab: number; tabs: LayoutTab[]; workspaceActions?: boolean };
 
 export type RelayMessage = {
   type?: unknown;
@@ -48,6 +50,10 @@ export type RelayMessage = {
   wisptermConnected?: unknown;
   activeTab?: unknown;
   tabs?: unknown;
+  workspaceActions?: unknown;
+  requestId?: unknown;
+  status?: unknown;
+  tabId?: unknown;
 };
 
 export type SurfaceView = {
@@ -57,6 +63,8 @@ export type SurfaceView = {
   control: HTMLElement;
   controlTitle: HTMLSpanElement;
   controlButton: HTMLButtonElement;
+  paneDragHandle: HTMLButtonElement;
+  paneCloseButton: HTMLButtonElement;
   scrollbar: HTMLDivElement;
   scrollbarThumb: HTMLDivElement;
   aiContainer: HTMLDivElement | null;
@@ -101,7 +109,7 @@ export type ConnectionStatus = {
   detail: string;
 };
 
-export type DesktopPanelMode = "layout" | "single";
+export type PanelMode = "layout" | "single";
 
 export type MobileInputMode = "edit" | "view";
 

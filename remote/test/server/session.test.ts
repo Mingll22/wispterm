@@ -399,3 +399,82 @@ test("only current host broadcasts validated ordered terminal events to its own 
   ]);
   assert.equal(otherBrowser.sent.length, otherInitial);
 });
+
+test("workspace action identities cannot be forged and replies are private", () => {
+  const session = new RemoteSession("alpha");
+  const host = new FakeSocket(), first = new FakeSocket(), second = new FakeSocket();
+  session.attachWispTerm(host as never);
+  session.attachBrowser(first as never);
+  session.attachBrowser(second as never);
+  const firstId = messages(first)[0].clientId, secondId = messages(second)[0].clientId;
+  const firstCount = first.sent.length, secondCount = second.sent.length;
+  receive(first, { type: "workspace-action", requestId: "req_1", action: "close-pane", clientId: secondId, tabId: "0123456789abcdef", layoutRevision: "000000000000000a", surfaceId: "fedcba9876543210", ignored: true });
+  assert.deepEqual(messages(host).at(-1), { type: "workspace-action", requestId: "req_1", action: "close-pane", clientId: firstId, tabId: "0123456789abcdef", layoutRevision: "000000000000000a", surfaceId: "fedcba9876543210" });
+  receive(host, { type: "workspace-action-result", requestId: "req_1", clientId: firstId, status: "stale", tabId: "0123456789abcdef", ignored: true });
+  assert.deepEqual(messages(first).slice(firstCount), [{ type: "workspace-action-result", requestId: "req_1", status: "stale", tabId: "0123456789abcdef" }]);
+  assert.equal(second.sent.length, secondCount);
+  receive(host, { type: "workspace-action-result", requestId: "req_1", clientId: firstId, status: "offline" });
+  receive(host, { type: "workspace-action-result", requestId: "req_1", clientId: firstId, status: "ok", tabId: "BAD" });
+  receive(second, { type: "workspace-action-result", requestId: "req_1", clientId: firstId, status: "ok" });
+  assert.equal(first.sent.length, firstCount + 1);
+});
+
+test("workspace wire validation rejects invalid shapes but leaves revisions to the host", () => {
+  const session = new RemoteSession("alpha"), host = new FakeSocket(), browser = new FakeSocket();
+  session.attachWispTerm(host as never);
+  session.attachBrowser(browser as never);
+  const base = { type: "workspace-action", requestId: "r", action: "set-layout", tabId: "0123456789abcdef", layoutRevision: "0000000000000000" };
+  const leaf = { surfaceId: "fedcba9876543210" };
+  for (const message of [
+    { ...base, requestId: "bad id", splitTree: [leaf] },
+    { ...base, requestId: "bad\n", splitTree: [leaf] },
+    { ...base, requestId: "a".repeat(65), splitTree: [leaf] },
+    { ...base, tabId: "0123456789abcdeF", splitTree: [leaf] },
+    { ...base, layoutRevision: "1", splitTree: [leaf] },
+    { ...base, splitTree: [] }, { ...base, splitTree: [leaf, leaf] },
+    { ...base, splitTree: [{ axis: "x", ratio: 0.5 }, leaf] },
+    { ...base, splitTree: [{ axis: "x", ratio: 0 }, leaf, leaf] },
+    { ...base, splitTree: [{ axis: "y", ratio: 1 }, leaf, leaf] },
+    { ...base, splitTree: [{ axis: "z", ratio: 0.5 }, leaf, leaf] },
+    { ...base, splitTree: [{ ...leaf, axis: "x", ratio: 0.5 }] },
+    { ...base, splitTree: Array.from({ length: 129 }, () => leaf) },
+    { ...base, action: "add-pane" }, { ...base, action: "create-tab" },
+    { ...base, action: "close-tab", surfaceId: leaf.surfaceId },
+  ]) receive(browser, message);
+  assert.equal(host.sent.length, 0);
+  receive(browser, { ...base, splitTree: [{ axis: "x", ratio: 0.5 }, leaf, { surfaceId: "1111111111111111" }] });
+  assert.equal(messages(host).length, 1);
+  assert.equal(messages(host)[0].layoutRevision, "0000000000000000");
+});
+
+test("workspace action reports offline for absent or failed host", () => {
+  for (const failed of [false, true]) {
+    const session = new RemoteSession("alpha"), browser = new FakeSocket();
+    session.attachBrowser(browser as never);
+    if (failed) session.attachWispTerm(new ThrowingSocket() as never);
+    receive(browser, { type: "workspace-action", requestId: "r", action: "create-tab" });
+    assert.deepEqual(messages(browser).at(-1), { type: "workspace-action-result", requestId: "r", status: "offline" });
+  }
+});
+
+test("failed browser broadcast removes the client from every relay path", () => {
+  class FailingBrowser extends FakeSocket {
+    fail = false;
+    override send(payload: string): void {
+      if (this.fail) throw new Error("send failed");
+      super.send(payload);
+    }
+  }
+  const session = new RemoteSession("alpha"), host = new FakeSocket(), browser = new FailingBrowser();
+  session.attachWispTerm(host as never);
+  session.attachBrowser(browser as never);
+  const clientId = messages(browser)[0].clientId;
+  browser.fail = true;
+  receive(host, { type: "output", data: "broadcast" });
+  browser.fail = false;
+  const initial = browser.sent.length;
+  receive(host, { type: "workspace-action-result", requestId: "r", clientId, status: "ok" });
+  receive(browser, { type: "workspace-action", requestId: "r", action: "create-tab" });
+  assert.equal(browser.sent.length, initial);
+  assert.equal(host.sent.length, 0);
+});

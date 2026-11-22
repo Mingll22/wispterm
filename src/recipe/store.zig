@@ -329,7 +329,13 @@ test "listRecipes returns stems sorted, ignoring non-json files" {
 
 test "listRecipes on a missing directory yields an empty list" {
     const allocator = std.testing.allocator;
-    const items = try listRecipes(allocator, "/nonexistent/wispterm-recipes-dir");
+    var tmpdir = std.testing.tmpDir(.{});
+    defer tmpdir.cleanup();
+    const dir_path = try tmpdir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+    const missing_dir = try std.fs.path.join(allocator, &.{ dir_path, "missing" });
+    defer allocator.free(missing_dir);
+    const items = try listRecipes(allocator, missing_dir);
     defer freeRecipeList(allocator, items);
     try std.testing.expectEqual(@as(usize, 0), items.len);
 }

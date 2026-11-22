@@ -1,7 +1,8 @@
 import { tr } from "./i18n";
-import type { ConnectionStatus, MeResponse } from "./types";
+import type { ConnectionStatus, MeResponse, RelayMessage } from "./types";
+import { isWorkspaceId, type WorkspaceAction, type WorkspaceResult } from "../workspace_protocol";
 import { state, currentTab } from "./state";
-import { isLayoutMessage, normalizeLayout } from "./layout";
+import { isLayoutMessage, normalizeLayout, resolveLayoutSelection } from "./layout";
 import { decodeHex, encodeHex, safeJson, validPositiveInteger } from "./utils";
 import { saveSessionKey } from "./storage";
 import {
@@ -31,6 +32,11 @@ const HEARTBEAT_INTERVAL_MS = 25_000;
 const HEARTBEAT_WATCHDOG_MS = 50_000;
 const RECONNECT_MIN_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
+const WORKSPACE_ACTION_TIMEOUT_MS = 10_000;
+
+type ActionBody<T> = T extends WorkspaceAction ? Omit<T, "type" | "requestId"> : never;
+export type WorkspaceCommand = ActionBody<WorkspaceAction>;
+export type WorkspaceActionStatus = WorkspaceResult["status"] | "timeout";
 
 type TransportHooks = {
   onWorkspaceChanged: () => void;
@@ -64,6 +70,12 @@ let lastMessageAt = 0;
 let lastPingSentAt = 0;
 let lastLatencyMs: number | null = null;
 let wisptermPeerConnected: boolean | null = null;
+let pendingWorkspaceAction: {
+  request: WorkspaceAction;
+  timer: ReturnType<typeof setTimeout>;
+  finish: (status: WorkspaceActionStatus) => void;
+  created?: { tabId: string; surfaceId: string };
+} | null = null;
 
 setTerminalControlSender((request) => {
   const ws = state.socket;
@@ -102,6 +114,7 @@ export function connect(sessionKey: string): void {
   terminalControl.releaseAll();
   terminalControl.connect(null);
   state.socket?.close();
+  finishWorkspaceAction("offline");
   disposeSurfaceViews();
   state.layoutState = null;
   state.selectedSurfaceId = null;
@@ -130,6 +143,7 @@ export function connect(sessionKey: string): void {
     if (!wasActive) return;
     stopHeartbeat();
     state.socket = null;
+    finishWorkspaceAction("offline");
     terminalControl.connect(null);
     resetConnectionHealth();
     if (state.activeSessionKey === sessionKey) {
@@ -188,28 +202,31 @@ export function connect(sessionKey: string): void {
 
     if (message.type === "peer-status") {
       wisptermPeerConnected = message.wisptermConnected === true;
-      if (!wisptermPeerConnected) terminalControl.setDesktopReady(false);
+      if (!wisptermPeerConnected) {
+        terminalControl.setDesktopReady(false);
+        finishWorkspaceAction("offline");
+      }
       updateConnectionStatus();
       hooks.onInputUiChanged();
+      return;
+    }
+
+    if (message.type === "workspace-action-result") {
+      receiveWorkspaceActionResult(message);
       return;
     }
 
     if (isLayoutMessage(message)) {
       wisptermPeerConnected = true;
       terminalControl.setDesktopReady(true);
-      updateConnectionStatus();
+      const previousTab = state.hasSeenLayout ? currentTab() : null;
       state.layoutState = normalizeLayout(message);
-      if (!state.hasSeenLayout) {
-        state.selectedTabIndex = state.layoutState.activeTab;
-        state.hasSeenLayout = true;
-      } else if (!state.layoutState.tabs.some((tab) => tab.index === state.selectedTabIndex)) {
-        state.selectedTabIndex = state.layoutState.activeTab;
-      }
-      const activeTab = currentTab();
-      if (!state.selectedSurfaceId || !activeTab?.surfaces.some((surface) => surface.id === state.selectedSurfaceId)) {
-        state.selectedSurfaceId =
-          activeTab?.focusedSurfaceId ?? activeTab?.surfaces[0]?.id ?? state.selectedSurfaceId;
-      }
+      const selection = resolveLayoutSelection(state.layoutState, previousTab, state.selectedSurfaceId);
+      state.hasSeenLayout = true;
+      state.selectedTabIndex = selection.tabIndex;
+      state.selectedSurfaceId = selection.surfaceId;
+      selectCreatedWorkspacePane();
+      updateConnectionStatus();
       reconcileSurfaceViews();
       hooks.onWorkspaceChanged();
       return;
@@ -236,12 +253,79 @@ export function disconnect(): void {
   reconnectAttempts = 0;
   terminalControl.releaseAll();
   terminalControl.connect(null);
+  finishWorkspaceAction("offline");
   if (state.socket) {
     try { state.socket.close(); } catch { /* ignore */ }
     state.socket = null;
   }
   resetConnectionHealth();
   hooks.setStatus(connectionStatusOffline());
+}
+
+export function workspaceActionAvailable(): boolean {
+  return wisptermPeerConnected === true && state.socket?.readyState === WebSocket.OPEN &&
+    state.layoutState?.workspaceActions === true && pendingWorkspaceAction === null;
+}
+
+export function sendWorkspaceAction(command: WorkspaceCommand): Promise<WorkspaceActionStatus> {
+  const socket = state.socket;
+  if (!socket || !workspaceActionAvailable()) return Promise.resolve("offline");
+  const requestId = Array.from(crypto.getRandomValues(new Uint32Array(4)), (word) => word.toString(16).padStart(8, "0")).join("");
+  const request: WorkspaceAction = { type: "workspace-action", requestId, ...command };
+  return new Promise((finish) => {
+    const timer = setTimeout(() => finishWorkspaceAction("timeout"), WORKSPACE_ACTION_TIMEOUT_MS);
+    pendingWorkspaceAction = { request, timer, finish };
+    try {
+      socket.send(JSON.stringify(request));
+    } catch {
+      finishWorkspaceAction("offline");
+    }
+  });
+}
+
+function finishWorkspaceAction(status: WorkspaceActionStatus): void {
+  const pending = pendingWorkspaceAction;
+  if (!pending) return;
+  pendingWorkspaceAction = null;
+  clearTimeout(pending.timer);
+  pending.finish(status);
+}
+
+function receiveWorkspaceActionResult(message: RelayMessage): void {
+  const pending = pendingWorkspaceAction;
+  if (!pending || message.requestId !== pending.request.requestId) return;
+  switch (message.status) {
+    case "ok":
+      if (pending.request.action === "create-tab" || pending.request.action === "add-pane") {
+        if (!isWorkspaceId(message.tabId) || !isWorkspaceId(message.surfaceId)) {
+          finishWorkspaceAction("failed");
+          return;
+        }
+        pending.created = { tabId: message.tabId, surfaceId: message.surfaceId };
+        if (selectCreatedWorkspacePane()) hooks.onWorkspaceChanged();
+      } else {
+        finishWorkspaceAction("ok");
+      }
+      return;
+    case "stale":
+    case "unsupported":
+    case "protected":
+    case "limit":
+    case "failed":
+    case "offline":
+      finishWorkspaceAction(message.status);
+  }
+}
+
+function selectCreatedWorkspacePane(): boolean {
+  const created = pendingWorkspaceAction?.created;
+  if (!created) return false;
+  const tab = state.layoutState?.tabs.find((entry) => entry.workspace?.tabId === created.tabId);
+  if (!tab?.surfaces.some((surface) => surface.id === created.surfaceId)) return false;
+  state.selectedTabIndex = tab.index;
+  state.selectedSurfaceId = created.surfaceId;
+  finishWorkspaceAction("ok");
+  return true;
 }
 
 export function sendInputBytes(surfaceId: string, data: string): void {

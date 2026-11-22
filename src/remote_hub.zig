@@ -1,6 +1,6 @@
 //! WispTerm Remote message hub: the single producer of relay-format messages
-//! (`layout`, terminal grid/state/bytes, `open-ai-agent-result`) and the single
-//! consumer of relay-format terminal/AI commands, independent of
+//! (layout, terminal grid/state/bytes, action results) and the single
+//! consumer of relay-format terminal, workspace and AI commands, independent of
 //! how the bytes travel.
 //!
 //! Surfaces register as sinks here and publish PTY output with their stable
@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const terminal_control = @import("remote_terminal_control.zig");
+const workspace = @import("remote_workspace.zig");
 const GridSize = @import("core/geometry.zig").GridSize;
 
 var next_surface_counter = std.atomic.Value(u64).init(1);
@@ -41,6 +42,13 @@ const SurfaceSink = struct {
     },
 };
 
+const WorkspaceAction = struct {
+    window: usize,
+    request: std.json.Parsed(workspace.Request),
+};
+
+pub const max_workspace_actions = 16;
+
 pub const Transport = struct {
     ctx: *anyopaque,
     send_fn: TransportSendFn,
@@ -56,6 +64,9 @@ pub const Hub = struct {
     transports: std.ArrayListUnmanaged(Transport) = .empty,
     ai_agent_open_ctx: ?*anyopaque = null,
     ai_agent_open_fn: ?AiAgentOpenFn = null,
+    workspace_window: ?usize = null,
+    workspace_wakeup: ?*const fn () void = null,
+    workspace_actions: std.ArrayListUnmanaged(WorkspaceAction) = .empty,
     last_layout: ?[]u8 = null,
     grid_epoch: u64 = 0,
     layout_epoch: u64 = 0,
@@ -76,6 +87,8 @@ pub const Hub = struct {
         self.sinks_mutex.unlock();
         self.mutex.lock();
         self.transports.deinit(self.allocator);
+        for (self.workspace_actions.items) |action| action.request.deinit();
+        self.workspace_actions.deinit(self.allocator);
         if (self.last_layout) |layout| self.allocator.free(layout);
         self.last_layout = null;
         self.mutex.unlock();
@@ -152,6 +165,19 @@ pub const Hub = struct {
         self.broadcast(message);
     }
 
+    pub fn sendWorkspaceActionResult(self: *Hub, request: workspace.Request, result: workspace.Result) void {
+        const message = std.json.Stringify.valueAlloc(self.allocator, .{
+            .type = "workspace-action-result",
+            .requestId = request.requestId,
+            .clientId = request.clientId,
+            .status = @tagName(result.status),
+            .tabId = if (result.tab_id) |*id| @as([]const u8, id) else null,
+            .surfaceId = if (result.surface_id) |*id| @as([]const u8, id) else null,
+        }, .{ .emit_null_optional_fields = false }) catch return;
+        defer self.allocator.free(message);
+        self.broadcast(message);
+    }
+
     pub fn sendTerminalControlState(
         self: *Hub,
         surface_id: []const u8,
@@ -193,12 +219,12 @@ pub const Hub = struct {
 
     /// Remembers the layout for late joiners and broadcasts it when it changed.
     pub fn sendLayout(self: *Hub, layout_json: []const u8) void {
-        _ = self.sendLayoutIfCurrent(layout_json, null);
+        _ = self.sendLayoutIfCurrent(layout_json, null, null);
     }
 
     /// A resize may commit while the UI builds the snapshot across surfaces.
     /// Do not publish that older layout after the ordered grid event.
-    pub fn sendLayoutIfCurrent(self: *Hub, layout_json: []const u8, expected_grid_epoch: ?u64) bool {
+    pub fn sendLayoutIfCurrent(self: *Hub, layout_json: []const u8, expected_grid_epoch: ?u64, workspace_window: ?usize) bool {
         if (layout_json.len == 0) return false;
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -206,6 +232,7 @@ pub const Hub = struct {
         if (self.last_layout) |last| {
             if (std.mem.eql(u8, last, layout_json)) {
                 self.layout_epoch = self.grid_epoch;
+                self.workspace_window = workspace_window;
                 return true;
             }
         }
@@ -213,6 +240,7 @@ pub const Hub = struct {
         if (self.last_layout) |last| self.allocator.free(last);
         self.last_layout = next_layout;
         self.layout_epoch = self.grid_epoch;
+        self.workspace_window = workspace_window;
         self.broadcastLocked(next_layout);
         return true;
     }
@@ -279,6 +307,39 @@ pub const Hub = struct {
         self.ai_agent_open_fn = open_fn;
     }
 
+    pub fn registerWorkspaceWakeup(self: *Hub, wakeup: *const fn () void) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.workspace_wakeup = wakeup;
+    }
+
+    /// A window owns the requests queued against its published workspace.
+    /// Only its UI thread takes these requests and touches the live tabs.
+    pub fn takeWorkspaceAction(self: *Hub, window: usize) ?std.json.Parsed(workspace.Request) {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.workspace_actions.items, 0..) |action, i| {
+            if (action.window == window) return self.workspace_actions.orderedRemove(i).request;
+        }
+        return null;
+    }
+
+    pub fn detachWorkspaceWindow(self: *Hub, window: usize) void {
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            if (self.workspace_window == window) {
+                self.workspace_window = null;
+                if (self.last_layout) |layout| self.allocator.free(layout);
+                self.last_layout = null;
+            }
+        }
+        while (self.takeWorkspaceAction(window)) |request| {
+            defer request.deinit();
+            self.sendWorkspaceActionResult(request.value, .{ .status = .failed });
+        }
+    }
+
     // ---- inbound ----------------------------------------------------------
 
     /// LAN and legacy inputs carry no trusted browser identity.
@@ -292,6 +353,10 @@ pub const Hub = struct {
     }
 
     fn handleMessage(self: *Hub, message: []const u8, from_relay: bool) void {
+        if (isJsonMessageType(message, "workspace-action")) {
+            if (from_relay) self.handleRelayWorkspaceAction(message);
+            return;
+        }
         if (from_relay and (isJsonMessageType(message, "input-bytes") or isJsonMessageType(message, "terminal-control"))) {
             self.handleRelayTerminalMessage(message);
             return;
@@ -308,6 +373,33 @@ pub const Hub = struct {
             const request_id = extractJsonString(message, "requestId") orelse return;
             self.dispatchAiAgentOpen(request_id);
         }
+    }
+
+    fn handleRelayWorkspaceAction(self: *Hub, message: []const u8) void {
+        const request = workspace.parse(self.allocator, message) orelse return;
+        const submission = self.queueWorkspaceAction(request);
+        switch (submission) {
+            .queued => |wakeup| wakeup(),
+            .rejected => |status| {
+                defer request.deinit();
+                self.sendWorkspaceActionResult(request.value, .{ .status = status });
+            },
+        }
+    }
+
+    const WorkspaceSubmission = union(enum) {
+        queued: *const fn () void,
+        rejected: workspace.Status,
+    };
+
+    fn queueWorkspaceAction(self: *Hub, request: std.json.Parsed(workspace.Request)) WorkspaceSubmission {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const window = self.workspace_window orelse return .{ .rejected = .unsupported };
+        const wakeup = self.workspace_wakeup orelse return .{ .rejected = .unsupported };
+        if (self.workspace_actions.items.len >= max_workspace_actions) return .{ .rejected = .limit };
+        self.workspace_actions.append(self.allocator, .{ .window = window, .request = request }) catch return .{ .rejected = .failed };
+        return .{ .queued = wakeup };
     }
 
     const RelayTerminalMessage = struct {
@@ -651,6 +743,39 @@ test "only the relay path supplies lease identity to terminal sinks" {
     try std.testing.expectEqual(@as(usize, 1), sink.received);
 }
 
+test "workspace actions use authenticated relay admission and the published window" {
+    const allocator = std.testing.allocator;
+    var hub = Hub.init(allocator);
+    defer hub.deinit();
+    var receiver: TestTransport = .{ .allocator = allocator };
+    defer receiver.deinit();
+    hub.addTransport(&receiver, TestTransport.send);
+    hub.registerWorkspaceWakeup(struct {
+        fn wake() void {}
+    }.wake);
+
+    var message = "{\"type\":\"workspace-action\",\"action\":\"create-tab\",\"requestId\":\"request-1\",\"clientId\":\"client-1\"}".*;
+    hub.handleRelayMessage(&message);
+    try std.testing.expect(std.mem.indexOf(u8, receiver.received.items[0], "\"status\":\"unsupported\"") != null);
+
+    try std.testing.expect(hub.sendLayoutIfCurrent("{\"type\":\"layout\",\"workspaceActions\":true,\"tabs\":[]}", null, 1));
+    hub.handleIncomingMessage(&message);
+    try std.testing.expect(hub.takeWorkspaceAction(1) == null);
+
+    hub.handleRelayMessage(&message);
+    @memset(&message, 'x');
+    try std.testing.expect(hub.takeWorkspaceAction(2) == null);
+    const queued = hub.takeWorkspaceAction(1).?;
+    defer queued.deinit();
+    try std.testing.expectEqualStrings("request-1", queued.value.requestId);
+    try std.testing.expectEqualStrings("client-1", queued.value.clientId);
+    hub.sendWorkspaceActionResult(queued.value, .{ .status = .ok, .tab_id = "0000000000000001".*, .surface_id = "0000000000000002".* });
+    try std.testing.expectEqualStrings(
+        "{\"type\":\"workspace-action-result\",\"requestId\":\"request-1\",\"clientId\":\"client-1\",\"status\":\"ok\",\"tabId\":\"0000000000000001\",\"surfaceId\":\"0000000000000002\"}",
+        receiver.received.items[2],
+    );
+}
+
 test "grid publication invalidates layouts from before the commit" {
     const allocator = std.testing.allocator;
     const surface_id = "0000000000000001";
@@ -662,7 +787,7 @@ test "grid publication invalidates layouts from before the commit" {
     const epoch = hub.currentGridEpoch();
     hub.sendLayout("{\"type\":\"layout\",\"tabs\":[]}");
     hub.sendTerminalGrid(surface_id, .{ .cols = 1, .rows = 24 });
-    try std.testing.expect(!hub.sendLayoutIfCurrent("{\"type\":\"layout\",\"tabs\":[{}]}", epoch));
+    try std.testing.expect(!hub.sendLayoutIfCurrent("{\"type\":\"layout\",\"tabs\":[{}]}", epoch, null));
     try std.testing.expect(hub.layoutNeedsGridRefresh());
     try std.testing.expect(!hub.replayLastLayout(&transport));
     hub.sendOutput(surface_id, "redraw");

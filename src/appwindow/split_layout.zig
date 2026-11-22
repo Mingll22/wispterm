@@ -317,6 +317,19 @@ fn desktopLayout(rect: PixelRect, content: PixelRect, slot: SplitTree.Spatial.Sl
     };
 }
 
+/// Apply Web-authored geometry through the same pixel/grid path as painting,
+/// including for a background tab with no cached viewport rectangles.
+pub fn updateRemoteWorkspaceGeometry(allocator: std.mem.Allocator, tree: *const SplitTree, area: ContentRect) void {
+    const content: PixelRect = .{ .x = @intFromFloat(area.x), .y = @intFromFloat(area.y), .w = @intFromFloat(area.w), .h = @intFromFloat(area.h) };
+    var spatial = tree.spatial(allocator) catch return;
+    defer spatial.deinit(allocator);
+    var it = tree.surfaces();
+    while (it.next()) |entry| {
+        const slot = spatial.slots[entry.handle.idx()];
+        entry.surface.setRemoteWorkspaceLayout(desktopLayout(panePixelRect(slot, content), content, slot));
+    }
+}
+
 /// A native window resize affects every direct terminal in the window,
 /// including tabs not currently rendered. Use the same geometry as painting.
 pub fn updateRemoteWindowGeometry(width: i32, height: i32) void {

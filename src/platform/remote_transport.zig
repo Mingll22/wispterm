@@ -15,6 +15,8 @@ pub fn backendForOs(os_tag: std.Target.Os.Tag) Backend {
     };
 }
 
+pub const supported = backendForOs(builtin.os.tag) != .unsupported;
+
 const impl = switch (backendForOs(builtin.os.tag)) {
     .windows => @import("remote_transport_windows.zig"),
     .macos => @import("remote_transport_macos.zig"),

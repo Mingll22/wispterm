@@ -5,7 +5,8 @@ import {
   readSavedDesktopPanelMode,
   readSavedMobileVisualZoom,
   readSavedSidebarCollapsed,
-  saveDesktopPanelMode,
+  readSavedMobilePanelMode,
+  savePanelMode,
   saveMobileVisualZoom,
   saveSidebarCollapsed,
 } from "../../src/client/storage";
@@ -33,10 +34,13 @@ test("desktop panel mode preference round-trips through storage", () => {
 
   assert.equal(readSavedDesktopPanelMode(), "layout");
 
-  saveDesktopPanelMode("single");
+  savePanelMode("single", false);
   assert.equal(readSavedDesktopPanelMode(), "single");
 
-  saveDesktopPanelMode("layout");
+  savePanelMode("layout", false);
+  assert.equal(readSavedMobilePanelMode(), "single");
+  savePanelMode("layout", true);
+  assert.equal(readSavedMobilePanelMode(), "layout");
   assert.equal(readSavedDesktopPanelMode(), "layout");
 });
 

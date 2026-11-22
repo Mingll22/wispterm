@@ -390,6 +390,7 @@ test {
     _ = @import("lan_stream.zig");
     _ = @import("remote_hub.zig");
     _ = @import("remote_terminal_control.zig");
+    _ = @import("remote_workspace.zig");
     _ = @import("ctl/client.zig");
     _ = @import("ctl/key_names.zig");
     _ = @import("ctl/transport.zig");

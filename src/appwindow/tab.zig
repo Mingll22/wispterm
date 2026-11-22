@@ -12,6 +12,7 @@ const PreviewPane = @import("../preview/pane.zig");
 const markdown_preview = @import("../preview/markdown.zig");
 const input_key = @import("../input/key.zig");
 const remote_hub = @import("../remote_hub.zig");
+const remote_workspace = @import("../remote_workspace.zig");
 const session_persist = @import("../session_persist.zig");
 const recipe_store = @import("../recipe/store.zig");
 const ai_chat = @import("../assistant/conversation/session.zig");
@@ -74,6 +75,7 @@ pub const TabState = struct {
     kind: Kind = .terminal,
     tree: SplitTree,
     focused: SplitTree.Node.Handle = .root,
+    workspace_id: ?remote_workspace.Id = null,
     ai_chat_session: ?*ai_chat.Session = null,
     ai_history_session: ?*ai_history_session.Session = null,
     memory_center_session: ?*memory_center_session.Session = null,
@@ -941,6 +943,11 @@ pub fn activePortForwarding() ?*port_forwarding.Session {
 /// The caller is responsible for clearing selection state and setting rebuild flags.
 pub fn closeTab(idx: usize, allocator: std.mem.Allocator) void {
     if (g_tab_count <= 1) return;
+    removeTab(idx, allocator);
+}
+
+/// Remove a tab from a window whose owner permits an empty workspace.
+pub fn removeTab(idx: usize, allocator: std.mem.Allocator) void {
     if (idx >= g_tab_count) return;
 
     if (g_tabs[idx]) |t| {
@@ -960,7 +967,7 @@ pub fn closeTab(idx: usize, allocator: std.mem.Allocator) void {
 
     if (active_tab_state.g_active_tab == idx) {
         if (active_tab_state.g_active_tab >= g_tab_count) {
-            active_tab_state.g_active_tab = g_tab_count - 1;
+            active_tab_state.g_active_tab = g_tab_count -| 1;
         }
     } else if (active_tab_state.g_active_tab > idx) {
         active_tab_state.g_active_tab -= 1;
@@ -1275,9 +1282,10 @@ pub fn splitFocusedReturningSurface(
     else
         getShellCmd();
 
-    return splitFocusedSurfaceWithCommand(
+    return splitSurfaceWithCommand(
         allocator,
         t,
+        t.focused,
         focused_surface,
         direction,
         cell_w,
@@ -1307,9 +1315,10 @@ pub fn splitFocusedWithCommandReturningSurface(
     const t = activeTab() orelse return null;
     if (t.kind != .terminal) return null;
     const focused_surface = t.focusedSurface() orelse return null;
-    return splitFocusedSurfaceWithCommand(
+    return splitSurfaceWithCommand(
         allocator,
         t,
+        t.focused,
         focused_surface,
         direction,
         cell_w,
@@ -1322,10 +1331,26 @@ pub fn splitFocusedWithCommandReturningSurface(
     );
 }
 
-fn splitFocusedSurfaceWithCommand(
+/// Split a specific terminal, using the configured shell independently of the
+/// tab's active pane or connection profile.
+pub fn splitWithDefaultShell(
     allocator: std.mem.Allocator,
     t: *TabState,
-    focused_surface: *Surface,
+    target: SplitTree.SurfaceEntry,
+    direction: SplitTree.Split.Direction,
+    cell_w: f32,
+    cell_h: f32,
+    cursor_style: CursorStyle,
+    cursor_blink: bool,
+) ?*Surface {
+    return splitSurfaceWithCommand(allocator, t, target.handle, target.surface, direction, cell_w, cell_h, cursor_style, cursor_blink, null, getShellCmd(), false);
+}
+
+fn splitSurfaceWithCommand(
+    allocator: std.mem.Allocator,
+    t: *TabState,
+    target: SplitTree.Node.Handle,
+    target_surface: *Surface,
     direction: SplitTree.Split.Direction,
     cell_w: f32,
     cell_h: f32,
@@ -1336,9 +1361,9 @@ fn splitFocusedSurfaceWithCommand(
     inherit_ssh_connection: bool,
 ) ?*Surface {
     // Calculate exact dimensions for the new split surface
-    const screen_w = focused_surface.size.screen.width;
-    const screen_h = focused_surface.size.screen.height;
-    const pad = focused_surface.getPadding();
+    const screen_w = target_surface.size.screen.width;
+    const screen_h = target_surface.size.screen.height;
+    const pad = target_surface.getPadding();
     const pad_w = pad.left + pad.right;
     const pad_h = pad.top + pad.bottom;
 
@@ -1379,7 +1404,7 @@ fn splitFocusedSurfaceWithCommand(
     new_surface.attachRemoteHub(g_remote_hub);
 
     if (inherit_ssh_connection) {
-        if (focused_surface.ssh_connection) |conn| {
+        if (target_surface.ssh_connection) |conn| {
             new_surface.setSshConnectionValue(conn);
         }
     }
@@ -1401,7 +1426,7 @@ fn splitFocusedSurfaceWithCommand(
 
     const new_tree = t.tree.split(
         allocator,
-        t.focused,
+        target,
         direction,
         0.5,
         &insert_tree,
@@ -1444,7 +1469,7 @@ pub fn closeFocusedSplit(allocator: std.mem.Allocator) CloseResult {
         return .closed_tab;
     }
 
-    if (!t.tree.isSplit()) {
+    if (!t.tree.isSplit() or t.focused.idx() >= t.tree.nodes.len or t.tree.nodes[t.focused.idx()] != .leaf) {
         if (g_tab_count <= 1) {
             return .close_window;
         } else {
@@ -1453,36 +1478,28 @@ pub fn closeFocusedSplit(allocator: std.mem.Allocator) CloseResult {
         }
     }
 
-    // `remove` re-packs the node array, so a handle taken from the old tree
-    // names a different node afterwards (possibly a split, which would leave
-    // keystrokes with no pane to go to). Remember the pane itself and look it
-    // up in the new tree.
-    const next_focus = t.tree.goto(allocator, t.focused, .next_wrapped) catch null;
-    const next_pane: ?SplitTree.Pane = if (next_focus) |nf| blk: {
-        if (nf == t.focused or nf.idx() >= t.tree.nodes.len) break :blk null;
-        break :blk switch (t.tree.nodes[nf.idx()]) {
-            .leaf => |pane| pane,
-            .split => null,
-        };
-    } else null;
-
-    const new_tree = t.tree.remove(allocator, t.focused) catch {
+    removeSplitPane(allocator, t, t.focused) catch {
         std.debug.print("Failed to remove split from tree\n", .{});
         return .no_op;
     };
+    return .closed_split;
+}
+
+/// Remove one leaf from a split tab. An unaffected focused pane keeps its
+/// identity even when the tree compacts its handles.
+pub fn removeSplitPane(allocator: std.mem.Allocator, t: *TabState, target: SplitTree.Node.Handle) !void {
+    std.debug.assert(t.tree.isSplit() and t.tree.nodes[target.idx()] == .leaf);
+    const old_focus = if (t.focused != target) t.focused else (try t.tree.goto(allocator, target, .next_wrapped)) orelse .root;
+    const next_pane: ?SplitTree.Pane = if (old_focus != target and old_focus.idx() < t.tree.nodes.len) switch (t.tree.nodes[old_focus.idx()]) {
+        .leaf => |pane| pane,
+        .split => null,
+    } else null;
+
+    const new_tree = try t.tree.remove(allocator, target);
 
     var old_tree = t.tree;
     t.tree = new_tree;
     old_tree.deinit();
-
-    if (t.tree.isEmpty()) {
-        if (g_tab_count <= 1) {
-            return .close_window;
-        } else {
-            closeTab(active_tab_state.g_active_tab, allocator);
-            return .closed_tab;
-        }
-    }
 
     // Find valid focus in new tree
     var it = t.tree.surfaces();
@@ -1498,7 +1515,6 @@ pub fn closeFocusedSplit(allocator: std.mem.Allocator) CloseResult {
     }
 
     std.debug.print("Split closed, new focused handle: {}, tree nodes: {}\n", .{ @intFromEnum(t.focused), t.tree.nodes.len });
-    return .closed_split;
 }
 
 /// Handle of `wanted` in `tree`, matched by pane identity, or null when the
@@ -2295,7 +2311,6 @@ test "snapshotActiveIndex follows the active tab past skipped tabs" {
 /// returned ArenaAllocator; deinit it after the Session is no longer needed.
 pub fn collectSessionSnapshot(arena: *std.heap.ArenaAllocator) !session_persist.Session {
     const alloc = arena.allocator();
-    if (g_tab_count == 0) return error.NoTabs;
 
     // tmux tabs are NOT persisted as surface trees — they are recreated by the
     // controller on restore (see tmux_profiles below). Skip them here.
@@ -2325,11 +2340,13 @@ pub fn collectSessionSnapshot(arena: *std.heap.ArenaAllocator) !session_persist.
 
 /// One-shot: collect the current session and write it atomically. Errors are
 /// logged but not propagated — close path must not be blocked.
-pub fn dumpSessionToFile(allocator: std.mem.Allocator) void {
+pub fn dumpSessionToFile(allocator: std.mem.Allocator, workspace_emptied: bool) void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const session = collectSessionSnapshot(&arena) catch |err| {
+    const session = collectSessionSnapshot(&arena) catch |err| if (err == error.NoTabs and workspace_emptied and g_tab_count == 0)
+        session_persist.Session{ .tabs = &.{} }
+    else {
         std.debug.print("dumpSessionToFile: collect failed: {}\n", .{err});
         return;
     };
