@@ -447,6 +447,41 @@ test("workspace wire validation rejects invalid shapes but leaves revisions to t
   assert.equal(messages(host)[0].layoutRevision, "0000000000000000");
 });
 
+test("workspace rename forwards exact UTF-8 metadata with a stamped identity", () => {
+  const session = new RemoteSession("alpha");
+  const host = new FakeSocket(), browser = new FakeSocket(), other = new FakeSocket();
+  session.attachWispTerm(host as never);
+  session.attachBrowser(browser as never);
+  session.attachBrowser(other as never);
+  const { clientId } = messages(browser)[0];
+  const target = {
+    type: "workspace-action", action: "rename-tab", requestId: "rename_1",
+    tabId: "0123456789abcdef", layoutRevision: "000000000000000a",
+  };
+  const tooLong = "🔧".repeat(64) + "a";
+  for (const message of [
+    target, { ...target, title: null }, { ...target, title: {} },
+    { ...target, title: "ok", leaseId: 1 }, { ...target, title: "ok", leaseId: null },
+    { ...target, title: "ok", surfaceId: "fedcba9876543210" },
+    { ...target, title: "ok", splitTree: [] },
+    { ...target, title: "ok", layoutRevision: "bad" },
+    { ...target, title: "ok", action: "close-tab" },
+    ...[tooLong, "a\nb", "a\u001bb", "a\u007fb", "a\u0085b", "a\u2028b", "a\u2029b", "a\ud800b"].map(title => ({ ...target, title })),
+  ]) receive(browser, message);
+  assert.equal(host.sent.length, 0);
+
+  for (const title of ["", "  项目工作台  ", "🔧".repeat(64)]) {
+    receive(browser, { ...target, title, clientId: messages(other)[0].clientId, ignored: true });
+    assert.deepEqual(messages(host).at(-1), { ...target, title, clientId });
+  }
+  const nextLayout = { type: "layout", workspaceActions: true, tabRename: true, tabs: [
+    { index: 0, tabId: target.tabId, layoutRevision: target.layoutRevision, title: "Renamed", surfaces: [] },
+  ] };
+  receive(host, nextLayout);
+  assert.deepEqual(messages(browser).at(-1), nextLayout);
+  assert.deepEqual(messages(other).at(-1), nextLayout);
+});
+
 test("workspace action reports offline for absent or failed host", () => {
   for (const failed of [false, true]) {
     const session = new RemoteSession("alpha"), browser = new FakeSocket();

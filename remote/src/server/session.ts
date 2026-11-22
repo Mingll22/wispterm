@@ -15,6 +15,7 @@ export type RelayMessage = {
   wisptermConnected?: boolean;
   activeTab?: number;
   tabControl?: boolean;
+  tabRename?: boolean;
   tabs?: Array<{
     index: number;
     focusedSurfaceId?: string;

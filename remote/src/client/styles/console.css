@@ -1001,7 +1001,7 @@
   pointer-events: none;
 }
 
-.panels-stage[data-mirrored] .remote-panel.selected::before {
+.panels-stage[data-mirrored] .remote-panel[data-focused]::before {
   z-index: 2;
   border-color: var(--terminal-focus);
   box-shadow:

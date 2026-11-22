@@ -1,12 +1,14 @@
 // Wire validation only: the desktop owns revision and surface membership checks.
 export type WorkspaceNode = { surfaceId: string } | { axis: "x" | "y"; ratio: number };
 type WorkspaceBase = { type: "workspace-action"; requestId: string };
-type WorkspaceTarget = { tabId: string; layoutRevision: string; leaseId?: number };
+type WorkspaceTarget = { tabId: string; layoutRevision: string };
+type LeasedTarget = WorkspaceTarget & { leaseId?: number };
 export type WorkspaceAction =
   | (WorkspaceBase & { action: "create-tab" })
-  | (WorkspaceBase & WorkspaceTarget & { action: "add-pane" | "close-pane"; surfaceId: string })
-  | (WorkspaceBase & WorkspaceTarget & { action: "close-tab" })
-  | (WorkspaceBase & WorkspaceTarget & { action: "set-layout"; splitTree: WorkspaceNode[] });
+  | (WorkspaceBase & LeasedTarget & { action: "add-pane" | "close-pane"; surfaceId: string })
+  | (WorkspaceBase & LeasedTarget & { action: "close-tab" })
+  | (WorkspaceBase & LeasedTarget & { action: "set-layout"; splitTree: WorkspaceNode[] })
+  | (WorkspaceBase & WorkspaceTarget & { action: "rename-tab"; title: string });
 export type WorkspaceResult = {
   type: "workspace-action-result";
   requestId: string;
@@ -42,28 +44,41 @@ export function parseWorkspaceTree(value: unknown): WorkspaceNode[] | null {
   return slots === 0 ? result : null;
 }
 
+export const MAX_TAB_TITLE_BYTES = 256;
+const titleEncoder = new TextEncoder();
+const titleControls = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\ud800-\udfff]/u;
+export function isTabTitle(value: unknown): value is string {
+  return typeof value === "string" && value.length <= MAX_TAB_TITLE_BYTES &&
+    !titleControls.test(value) && titleEncoder.encode(value).length <= MAX_TAB_TITLE_BYTES;
+}
+
 export function browserWorkspaceAction(value: unknown, clientId: string): (WorkspaceAction & { clientId: string }) | null {
   if (!record(value) || value.type !== "workspace-action" || !requestId(value.requestId)) return null;
   const base = { type: "workspace-action" as const, requestId: value.requestId, clientId };
   if (value.action === "create-tab") {
-    if (value.tabId !== undefined || value.layoutRevision !== undefined || value.surfaceId !== undefined || value.splitTree !== undefined || value.leaseId !== undefined) return null;
+    if (value.tabId !== undefined || value.layoutRevision !== undefined || value.surfaceId !== undefined || value.splitTree !== undefined || value.leaseId !== undefined || value.title !== undefined) return null;
     return { ...base, action: "create-tab" };
   }
-  if (!isWorkspaceId(value.tabId) || !isWorkspaceId(value.layoutRevision) ||
-      (value.leaseId !== undefined && !validLeaseId(value.leaseId))) return null;
-  const target = { tabId: value.tabId, layoutRevision: value.layoutRevision, ...(value.leaseId === undefined ? {} : { leaseId: value.leaseId as number }) };
+  if (!isWorkspaceId(value.tabId) || !isWorkspaceId(value.layoutRevision)) return null;
+  const target = { tabId: value.tabId, layoutRevision: value.layoutRevision };
+  if (value.action === "rename-tab") {
+    if (value.leaseId !== undefined || value.surfaceId !== undefined || value.splitTree !== undefined || !isTabTitle(value.title)) return null;
+    return { ...base, ...target, action: "rename-tab", title: value.title };
+  }
+  if (value.title !== undefined || (value.leaseId !== undefined && !validLeaseId(value.leaseId))) return null;
+  const lease = value.leaseId === undefined ? {} : { leaseId: value.leaseId };
   if (value.action === "add-pane" || value.action === "close-pane") {
     if (!isWorkspaceId(value.surfaceId) || value.splitTree !== undefined) return null;
-    return { ...base, ...target, action: value.action, surfaceId: value.surfaceId };
+    return { ...base, ...target, ...lease, action: value.action, surfaceId: value.surfaceId };
   }
   if (value.action === "close-tab") {
     if (value.surfaceId !== undefined || value.splitTree !== undefined) return null;
-    return { ...base, ...target, action: "close-tab" };
+    return { ...base, ...target, ...lease, action: "close-tab" };
   }
   if (value.action === "set-layout") {
     if (value.surfaceId !== undefined) return null;
     const splitTree = parseWorkspaceTree(value.splitTree);
-    return splitTree ? { ...base, ...target, action: "set-layout", splitTree } : null;
+    return splitTree ? { ...base, ...target, ...lease, action: "set-layout", splitTree } : null;
   }
   return null;
 }

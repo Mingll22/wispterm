@@ -15,6 +15,7 @@ import { escapeText, shortSurfaceId } from "../utils";
 import { api, connect, disconnect } from "../transport";
 import { webVersionLabel } from "../version";
 import {
+  blurRemoteTerminal,
   disposeSurfaceViews,
   focusAndFitSelectedSurface,
   refitAllSurfaces,
@@ -231,6 +232,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
             ${iconMenu()}
           </button>
           <div class="mobile-bar-main">
+            ${workspaceTabActionsMarkup(" chrome-tab-actions mobile-tab-actions")}
             <span class="mobile-bar-title" id="mobile-workspace-title">${tr("Remote terminal", "远程终端")}</span>
             <div class="mobile-surface-selector" id="mobile-surface-selector" data-collapsed="false" data-open="false" hidden>
               <div class="mobile-surface-strip" id="mobile-surface-strip" aria-label="${tr("Surfaces", "面板")}"></div>
@@ -239,7 +241,6 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
             </div>
           </div>
           <div class="mobile-chrome-controls">
-            ${workspaceTabActionsMarkup(" chrome-tab-actions mobile-tab-actions")}
             <div class="mobile-connection">
               ${themeToggleMarkup("mobile-theme-toggle")}
               <button type="button" class="status-pip" id="mobile-status-pip" data-state="offline" aria-label="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}" title="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}">${tr("Offline", "未连接")}</button>
@@ -273,13 +274,12 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
           <output class="workspace-action-status" id="workspace-action-status" aria-live="polite"></output>
         </section>
       </section>
-      <dialog class="glass-surface workspace-close-dialog" id="close-remote-tab" aria-labelledby="close-remote-tab-title" aria-describedby="close-remote-tab-message">
+      <dialog class="glass-surface workspace-close-dialog" id="close-remote-tab" aria-labelledby="close-remote-tab-message">
         <form method="dialog">
-          <h2 id="close-remote-tab-title">${tr("Delete tab", "删除标签")}</h2>
-          <p id="close-remote-tab-message"></p>
+          <h2 id="close-remote-tab-message"></h2>
           <div class="form-actions">
             <button class="secondary-button" value="cancel" autofocus>${tr("Cancel", "取消")}</button>
-            <button class="workspace-confirm-close" value="close">${tr("Delete tab", "删除标签")}</button>
+            <button class="workspace-confirm-close" value="close">${tr("Delete", "删除")}</button>
           </div>
         </form>
       </dialog>
@@ -288,11 +288,19 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
     </section>
   `;
 
+  app.querySelector(".console-shell")?.addEventListener("click", (event) => {
+    if (event.target instanceof Element && !event.target.closest(".terminal-host, .canvas-scrollbar, .ai-chat-mount")) {
+      blurRemoteTerminal();
+    }
+  }, true);
+
   workspaceControls = bindWorkspaceControls(app, {
     selectTab: (index) => {
-      state.selectedTabIndex = index;
-      const tab = currentTab();
-      state.selectedSurfaceId = tab?.focusedSurfaceId || tab?.surfaces[0]?.id || null;
+      if (state.selectedTabIndex !== index) {
+        state.selectedTabIndex = index;
+        const tab = currentTab();
+        state.selectedSurfaceId = tab?.focusedSurfaceId || tab?.surfaces[0]?.id || null;
+      }
       renderRemoteWorkspace();
       applyRemoteTabSelectionSidebarAction();
     },

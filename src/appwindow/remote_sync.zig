@@ -53,6 +53,9 @@ pub fn syncLayout(host: Host, allocator: std.mem.Allocator) void {
     defer allocator.free(layout);
     if (hub.sendLayoutIfCurrent(layout, grid_epoch, host.workspace_window)) {
         host.state.remote.layout_pending = false;
+        for (tab.g_tabs[0..tab.g_tab_count]) |maybe_tab| {
+            if (maybe_tab) |tab_state| tab_state.title_layout_pending = false;
+        }
     } else {
         host.state.remote.forceNextLayout();
     }
@@ -61,6 +64,13 @@ pub fn syncLayout(host: Host, allocator: std.mem.Allocator) void {
 /// Background or minimized tabs can change their grid or workspace without a frame.
 pub fn syncPendingLayout(host: Host, allocator: std.mem.Allocator) void {
     const hub = host.hub orelse return;
+    for (tab.g_tabs[0..tab.g_tab_count]) |maybe_tab| {
+        const tab_state = maybe_tab orelse continue;
+        if (tab_state.title_layout_pending) {
+            host.state.remote.forceNextLayout();
+            break;
+        }
+    }
     if (host.state.remote.layout_pending or hub.layoutNeedsGridRefresh()) syncLayout(host, allocator);
 }
 
@@ -93,6 +103,7 @@ pub fn handleWorkspaceRequests(
                 const result = apply(parsed.value);
                 hub.sendWorkspaceActionResult(parsed.value, result);
                 if (result.status == .ok or result.status == .stale) host.state.remote.forceNextLayout();
+                if (result.status == .ok and parsed.value.action == .@"rename-tab") host.markUiDirty();
             },
             .control => |parsed| handleTabControl(hub, parsed.value, can_mutate),
         }
@@ -128,7 +139,7 @@ pub fn buildLayoutJson(host: Host, allocator: std.mem.Allocator) ![]u8 {
 fn appendLayoutJson(host: Host, allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
     try out.appendSlice(allocator, "{\"type\":\"layout\",\"activeTab\":");
     try out.print(allocator, "{d}", .{active_tab_state.g_active_tab});
-    if (host.workspace_window != null) try out.appendSlice(allocator, ",\"workspaceActions\":true,\"tabControl\":true");
+    if (host.workspace_window != null) try out.appendSlice(allocator, ",\"workspaceActions\":true,\"tabControl\":true,\"tabRename\":true");
     try out.appendSlice(allocator, ",\"tabs\":[");
 
     var wrote_tab = false;
@@ -402,6 +413,42 @@ fn resetTestTabs() void {
     for (0..tab.MAX_TABS) |idx| tab.g_tabs[idx] = null;
     tab.g_tab_count = 0;
     active_tab_state.g_active_tab = 0;
+}
+
+test "remote sync publishes a pending title through the normal layout without waiting on the throttle" {
+    const allocator = std.testing.allocator;
+    resetTestTabs();
+    defer resetTestTabs();
+    var state = appwindow_state.State{};
+    var hub = remote.Hub.init(allocator);
+    defer hub.deinit();
+    var host = testHost(&state, allocator);
+    host.hub = &hub;
+    host.workspace_window = 1;
+    var tab_state: tab.TabState = .{ .tree = .empty };
+    tab.g_tabs[0] = &tab_state;
+    tab.g_tab_count = 1;
+
+    const Capture = struct {
+        rename_capability: bool = false,
+        title_seen: bool = false,
+
+        fn send(ctx: *anyopaque, message: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (!remote.isJsonMessageType(message, "layout")) return;
+            self.rename_capability = std.mem.indexOf(u8, message, "\"tabRename\":true") != null;
+            self.title_seen = std.mem.indexOf(u8, message, "\"title\":\"Focused Work\"") != null;
+        }
+    };
+    var capture: Capture = .{};
+    hub.addTransport(&capture, Capture.send);
+    syncLayout(host, allocator);
+    try std.testing.expect(capture.rename_capability);
+    try std.testing.expect(!capture.title_seen);
+    try std.testing.expect(tab_state.setTitleOverride("Focused Work"));
+    syncPendingLayout(host, allocator);
+    try std.testing.expect(capture.title_seen);
+    try std.testing.expect(!tab_state.title_layout_pending);
 }
 
 test "remote sync: layout serializes ai_history as non-terminal surface" {

@@ -102,8 +102,10 @@ pub fn findTab(id: remote_workspace.Id) ?struct { index: usize, state: *tab.TabS
 
 fn applyToTab(host: Host, request: remote_workspace.Request, index: usize, state: *tab.TabState) remote_workspace.Result {
     if (!state.supportsRemoteWorkspace()) return .{ .status = .unsupported };
-    const identity: remote_control.Identity = .{ .client_id = request.clientId, .lease_id = request.leaseId };
-    if (!state.remote_tab_control.lease.authorizes(identity)) return .{ .status = .denied };
+    if (request.action != .@"rename-tab") {
+        const identity: remote_control.Identity = .{ .client_id = request.clientId, .lease_id = request.leaseId };
+        if (!state.remote_tab_control.lease.authorizes(identity)) return .{ .status = .denied };
+    }
     if (!host.can_mutate) return .{ .status = .stale };
     const requested_revision = request.layoutRevision orelse return .{ .status = .failed };
     const current_revision = revision(&state.tree);
@@ -111,6 +113,10 @@ fn applyToTab(host: Host, request: remote_workspace.Request, index: usize, state
 
     switch (request.action) {
         .@"create-tab" => unreachable,
+        .@"rename-tab" => {
+            if (!state.setTitleOverride(request.title orelse return .{ .status = .failed })) return .{ .status = .failed };
+            return .{ .status = .ok, .tab_id = state.workspace_id };
+        },
         .@"add-pane" => {
             if (state.tree.nodes.len >= 2 * max_web_panes - 1) return .{ .status = .limit };
             const target = findSurface(&state.tree, request.surfaceId.?) orelse return .{ .status = .stale };
@@ -218,7 +224,7 @@ const LayoutBuilder = struct {
     }
 };
 
-test "workspace applies only a current revision and an exact surface permutation" {
+test "workspace rename is metadata only and split changes still require the current lease and revision" {
     const allocator = std.testing.allocator;
     const saved_tabs = tab.g_tabs;
     const saved_count = tab.g_tab_count;
@@ -277,6 +283,30 @@ test "workspace applies only a current revision and an exact surface permutation
     };
     const initial_revision = revision(&state.tree);
     const id = state.publishRemoteWorkspace().?;
+    var metadata = host;
+    metadata.layoutChanged = struct {
+        fn unexpected(_: *tab.TabState, _: ?remote_workspace.Id) void {
+            @panic("metadata update must not change terminal layout");
+        }
+    }.unexpected;
+    var rename: remote_workspace.Request = .{
+        .type = "workspace-action",
+        .requestId = "rename",
+        .clientId = "metadata-editor",
+        .action = .@"rename-tab",
+        .tabId = id,
+        .layoutRevision = remote_workspace.formatId(0),
+        .title = "My Workspace",
+    };
+    try std.testing.expectEqual(remote_workspace.Status.stale, apply(metadata, rename).status);
+    try std.testing.expectEqual(null, state.title_override_len);
+    rename.layoutRevision = initial_revision;
+    const renamed = apply(metadata, rename);
+    try std.testing.expectEqual(remote_workspace.Status.ok, renamed.status);
+    try std.testing.expectEqual(id, renamed.tab_id.?);
+    try std.testing.expectEqualStrings("My Workspace", state.getTitle());
+    try std.testing.expect(state.remote_tab_control.lease.grant == null);
+
     var hub = remote_hub.Hub.init(allocator);
     defer hub.deinit();
     state.remote_tab_control.request(&state.tree, &hub, .{
@@ -286,6 +316,12 @@ test "workspace applies only a current revision and an exact surface permutation
         .action = .acquire,
     });
     const lease_id = state.remote_tab_control.lease.grant.?.id;
+    rename.title = "";
+    try std.testing.expectEqual(remote_workspace.Status.ok, apply(metadata, rename).status);
+    try std.testing.expectEqual(@as(?usize, 0), state.title_override_len);
+    try std.testing.expectEqual(lease_id, state.remote_tab_control.lease.grant.?.id);
+    try std.testing.expectEqual(initial_revision, revision(&state.tree));
+
     var layout = [_]remote_workspace.Node{
         .{ .axis = .y, .ratio = 0.625 },
         .{ .surfaceId = b.remote_id },

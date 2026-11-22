@@ -10,7 +10,9 @@
 
 .workspace-new-tab[hidden],
 .workspace-tab-actions[hidden],
-.workspace-tab-actions .tab-control-toggle[hidden],
+.workspace-tab-actions .icon-button[hidden],
+.workspace-tab-row .tab-chip[hidden],
+.tab-title-input[hidden],
 .terminal-lease .pane-drag-handle[hidden] {
   display: none;
 }
@@ -30,6 +32,19 @@
 
 .workspace-tab-row .tab-chip {
   border: 0;
+  background: transparent;
+  touch-action: manipulation;
+}
+
+.tab-title-input {
+  grid-area: 1 / 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .workspace-tab-row .tab-chip-count {
@@ -44,6 +59,21 @@
   display: flex;
   align-items: center;
   gap: 3px;
+}
+
+.workspace-tab-actions[data-control] {
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-overlay-strong);
+  transition:
+    background-color var(--motion-duration) var(--motion-ease),
+    border-color var(--motion-duration) var(--motion-ease);
+}
+
+.workspace-tab-actions[data-held] {
+  border-color: color-mix(in srgb, var(--terminal-focus) 55%, var(--line));
+  background: color-mix(in srgb, var(--terminal-focus) 16%, var(--surface-overlay-strong));
 }
 
 .workspace-tab-actions .icon-button {
@@ -85,8 +115,17 @@
   height: var(--workspace-header-height);
 }
 
-.workspace-tab-actions .tab-control-toggle[data-held] {
-  opacity: 0.82;
+.collapsed-tab-actions[data-control] .icon-button {
+  width: calc(var(--workspace-header-height) - 2px);
+  height: calc(var(--workspace-header-height) - 2px);
+}
+
+.workspace-tab-actions[data-held] .tab-control-toggle {
+  color: var(--terminal-focus);
+}
+
+.mobile-tab-actions {
+  flex: 0 0 auto;
 }
 
 .workspace-tab-actions svg,
@@ -280,15 +319,10 @@
 }
 
 .workspace-close-dialog h2 {
-  margin: 0 0 8px;
-  font-size: 17px;
-}
-
-.workspace-close-dialog p {
   margin: 0 0 18px;
-  color: var(--muted);
+  font-size: 17px;
+  line-height: 1.45;
   overflow-wrap: anywhere;
-  font-size: 13px;
 }
 
 .workspace-close-dialog .form-actions {
@@ -329,6 +363,11 @@
 }
 
 @media (max-width: 860px), (pointer: coarse) and (max-width: 1024px) {
+  .tab-title-input {
+    min-height: 44px;
+    font-size: 15px;
+  }
+
   .mobile-bar .workspace-tab-actions .icon-button {
     width: 32px;
     min-width: 32px;

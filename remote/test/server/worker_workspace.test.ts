@@ -65,6 +65,30 @@ test("Worker stamps workspace identity and routes valid results to that browser 
 });
 
 
+test("Worker forwards workspace rename without a lease and broadcasts the authoritative title", () => {
+  const session = workerSession(), host = new WorkerSocket(), browser = new WorkerSocket(), other = new WorkerSocket();
+  session.attachWispTerm(host);
+  session.attachBrowser(browser);
+  session.attachBrowser(other);
+  const clientId = browser.messages()[0].clientId;
+  const rename = {
+    type: "workspace-action", action: "rename-tab", requestId: "rename_1", title: "项目工作台",
+    tabId: "0000000000000001", layoutRevision: "0000000000000002",
+  };
+  browser.receive({ ...rename, leaseId: 3 });
+  browser.receive({ ...rename, title: "invalid\u0085line" });
+  assert.equal(host.sent.length, 0);
+  browser.receive({ ...rename, clientId: other.messages()[0].clientId });
+  assert.deepEqual(host.messages().at(-1), { ...rename, clientId });
+
+  const layout = { type: "layout", workspaceActions: true, tabRename: true, tabs: [
+    { tabId: rename.tabId, layoutRevision: rename.layoutRevision, title: rename.title, surfaces: [] },
+  ] };
+  host.receive(layout);
+  assert.deepEqual(browser.messages().at(-1), layout);
+  assert.deepEqual(other.messages().at(-1), layout);
+});
+
 test("Worker removes failed browser from broadcasts, results, and input", () => {
   const session = workerSession(), host = new WorkerSocket(), browser = new WorkerSocket();
   session.attachWispTerm(host);

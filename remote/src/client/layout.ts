@@ -34,7 +34,7 @@ export function normalizeLayout(message: RelayMessage): LayoutState {
       };
     })
     .filter((tab): tab is LayoutTab => Boolean(tab));
-  return { activeTab, tabs, workspaceActions, tabControl: message.tabControl === true };
+  return { activeTab, tabs, workspaceActions, tabControl: message.tabControl === true, tabRename: message.tabRename === true };
 }
 
 function normalizeTabWorkspace(tab: Record<string, unknown>, surfaces: LayoutSurface[]): LayoutTab["workspace"] {

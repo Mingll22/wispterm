@@ -33,7 +33,7 @@ export type LayoutTab = {
   workspace?: { tabId: string; layoutRevision: string; tree: WorkspaceTree };
 };
 
-export type LayoutState = { activeTab: number; tabs: LayoutTab[]; workspaceActions?: boolean; tabControl?: boolean };
+export type LayoutState = { activeTab: number; tabs: LayoutTab[]; workspaceActions?: boolean; tabControl?: boolean; tabRename?: boolean };
 
 export type RelayMessage = {
   type?: unknown;
@@ -52,6 +52,7 @@ export type RelayMessage = {
   tabs?: unknown;
   workspaceActions?: unknown;
   tabControl?: unknown;
+  tabRename?: unknown;
   requestId?: unknown;
   status?: unknown;
   tabId?: unknown;

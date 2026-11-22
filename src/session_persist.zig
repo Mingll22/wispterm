@@ -139,6 +139,7 @@ pub const AiHistorySnap = struct {
 };
 
 pub const TabSnap = struct {
+    // Explicit tab label. An empty string records a cleared override.
     title_override: ?[]const u8 = null,
     focused_leaf: u32 = 0,
     zoomed_leaf: ?u32 = null,
