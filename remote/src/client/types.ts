@@ -10,6 +10,7 @@ export type LayoutSurface = {
   kind?: "terminal" | "ai_chat";
   readOnly?: boolean;
   terminalControl?: boolean;
+  imagePaste?: boolean;
   title?: string;
   focused?: boolean;
   snapshot?: string;

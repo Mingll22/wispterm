@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const remote_hub = @import("remote_hub.zig");
+const image_paste = @import("remote_image_paste.zig");
 const remote_transport = @import("platform/remote_transport.zig");
 const session_lock = @import("platform/session_lock.zig");
 
@@ -270,8 +271,6 @@ fn receiveThreadMain(client: *Client, websocket: remote_transport.WebSocketHandl
             client.condition.broadcast();
             return;
         }
-        if (received.bytes_read == 0) continue;
-
         if (received.buffer_type == .utf8_message or received.buffer_type == .utf8_fragment) {
             const maybe_message = incoming.push(
                 client.allocator,
@@ -408,6 +407,7 @@ fn appendQueryEscaped(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
 
 const IncomingMessageAssembler = struct {
     pending: std.ArrayListUnmanaged(u8) = .empty,
+    discarding: bool = false,
 
     fn deinit(self: *IncomingMessageAssembler, allocator: std.mem.Allocator) void {
         self.pending.deinit(allocator);
@@ -419,26 +419,37 @@ const IncomingMessageAssembler = struct {
         chunk: []const u8,
         buffer_type: remote_transport.BufferType,
     ) !?[]u8 {
-        switch (buffer_type) {
-            .utf8_fragment => {
-                try self.append(allocator, chunk);
-                return null;
-            },
-            .utf8_message => {
-                if (self.pending.items.len == 0) return try allocator.dupe(u8, chunk);
-                try self.append(allocator, chunk);
-                return try self.pending.toOwnedSlice(allocator);
-            },
+        const final = switch (buffer_type) {
+            .utf8_fragment => false,
+            .utf8_message => true,
             else => return null,
+        };
+        if (self.discarding) {
+            if (final) self.discarding = false;
+            return null;
         }
-    }
 
-    fn append(self: *IncomingMessageAssembler, allocator: std.mem.Allocator, chunk: []const u8) !void {
-        if (self.pending.items.len + chunk.len > MAX_INCOMING_MESSAGE_BYTES) {
+        if (self.pending.items.len + chunk.len > self.limit(chunk)) {
             self.pending.clearRetainingCapacity();
+            self.discarding = !final;
             return error.MessageTooLarge;
         }
+        if (final and self.pending.items.len == 0) return try allocator.dupe(u8, chunk);
+        errdefer {
+            self.pending.clearRetainingCapacity();
+            self.discarding = !final;
+        }
         try self.pending.appendSlice(allocator, chunk);
+        return if (final) try self.pending.toOwnedSlice(allocator) else null;
+    }
+
+    fn limit(self: *const IncomingMessageAssembler, chunk: []const u8) usize {
+        if (self.pending.items.len + chunk.len <= MAX_INCOMING_MESSAGE_BYTES) return MAX_INCOMING_MESSAGE_BYTES;
+        const prefix = image_paste.wire_prefix;
+        const pending_prefix_len = @min(self.pending.items.len, prefix.len);
+        const is_image = std.mem.eql(u8, self.pending.items[0..pending_prefix_len], prefix[0..pending_prefix_len]) and
+            std.mem.startsWith(u8, chunk, prefix[pending_prefix_len..]);
+        return if (is_image) image_paste.max_message_bytes else MAX_INCOMING_MESSAGE_BYTES;
     }
 };
 
@@ -488,4 +499,27 @@ test "incoming websocket fragments are reassembled before handling JSON" {
 
     const expected = "{\"type\":\"input-bytes\",\"surfaceId\":\"aichat0000000000\",\"encoding\":\"hex\",\"data\":\"68656c6c6f0d\"}";
     try std.testing.expectEqualStrings(expected, second.?);
+}
+
+test "fragment assembly gives only terminal image paste the larger limit" {
+    const allocator = std.testing.allocator;
+    var assembler: IncomingMessageAssembler = .{};
+    defer assembler.deinit(allocator);
+    const big_chunk = try allocator.alloc(u8, MAX_INCOMING_MESSAGE_BYTES);
+    defer allocator.free(big_chunk);
+    @memset(big_chunk, 'A');
+    const prefix = image_paste.wire_prefix;
+    try std.testing.expect((try assembler.push(allocator, prefix[0..10], .utf8_fragment)) == null);
+    try std.testing.expect((try assembler.push(allocator, prefix[10..], .utf8_fragment)) == null);
+    const image_message = (try assembler.push(allocator, big_chunk, .utf8_message)).?;
+    defer allocator.free(image_message);
+    try std.testing.expectEqual(prefix.len + big_chunk.len, image_message.len);
+
+    const input_prefix = "{\"type\":\"input-bytes\"";
+    try std.testing.expect((try assembler.push(allocator, input_prefix, .utf8_fragment)) == null);
+    try std.testing.expectError(error.MessageTooLarge, assembler.push(allocator, big_chunk, .utf8_fragment));
+    try std.testing.expect((try assembler.push(allocator, "{\"type\":\"untrusted-suffix\"}", .utf8_message)) == null);
+    const next = (try assembler.push(allocator, "{\"type\":\"ping\"}", .utf8_message)).?;
+    defer allocator.free(next);
+    try std.testing.expectEqualStrings("{\"type\":\"ping\"}", next);
 }

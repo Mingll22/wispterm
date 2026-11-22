@@ -3,8 +3,9 @@ import "./styles.css";
 
 import { initializeLocale } from "./i18n";
 
-import { refitAllSurfaces, setSurfaceInputHandler } from "./surfaces";
-import { kickReconnectIfIdle, loadMe, releaseRemoteControl, sendInputBytes, setTransportHooks } from "./transport";
+import { refitAllSurfaces, setSurfaceImagePasteHandler, setSurfaceInputHandler } from "./surfaces";
+import { kickReconnectIfIdle, loadMe, releaseRemoteControl, sendInputBytes, sendTerminalImagePaste, setTransportHooks } from "./transport";
+import { reportTerminalImagePaste } from "./terminal_clipboard";
 import { setMobileTextInputSender } from "./mobile_text_input";
 import { setVirtualKeyboardSender } from "./vkbd";
 import {
@@ -23,6 +24,7 @@ const app: HTMLElement = appRoot;
 initializeLocale();
 
 setSurfaceInputHandler(sendInputBytes);
+setSurfaceImagePasteHandler((surfaceId, file) => void reportTerminalImagePaste(() => sendTerminalImagePaste(surfaceId, file)));
 setMobileTextInputSender(sendInputBytes);
 setVirtualKeyboardSender(sendInputBytes);
 setTransportHooks({

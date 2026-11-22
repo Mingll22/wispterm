@@ -36,6 +36,7 @@ import { getTerminalPalette, subscribeToTheme } from "./theme";
 import { REMOTE_TERMINAL_SCROLLBACK } from "./terminal_options";
 import { mapScaledTerminalPointer } from "./terminal_pointer";
 import { bindAlternateScreenResize } from "./terminal_resize";
+import { bindTerminalClipboard } from "./terminal_clipboard";
 import { supportedTerminalGrid, terminalControl, type TerminalControlTarget } from "./terminal_control";
 import { tabControl } from "./tab_control";
 import { workspaceGeometry } from "./workspace_layout";
@@ -57,13 +58,19 @@ const DESKTOP_SCROLLBAR_MIN_THUMB_HEIGHT = 32;
 const DESKTOP_SCROLLBAR_VERTICAL_INSET = 10;
 
 type InputHandler = (surfaceId: string, data: string) => void;
+type ImagePasteHandler = (surfaceId: string, file: File) => void;
 let controlMeasurementQueued = false;
 let inputHandler: InputHandler = () => {
   // no-op until transport registers
 };
+let imagePasteHandler: ImagePasteHandler = () => {};
 
 export function setSurfaceInputHandler(handler: InputHandler): void {
   inputHandler = handler;
+}
+
+export function setSurfaceImagePasteHandler(handler: ImagePasteHandler): void {
+  imagePasteHandler = handler;
 }
 
 subscribeToTheme((palette) => {
@@ -157,6 +164,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
   });
   bindAlternateScreenResize(term);
   suppressMirroredTerminalReplies(term);
+  bindTerminalClipboard(term, host, (file) => imagePasteHandler(surfaceId, file));
   term.loadAddon(fit);
 
   const view: SurfaceView = {

@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const terminal_control = @import("remote_terminal_control.zig");
+const image_paste = @import("remote_image_paste.zig");
 const workspace = @import("remote_workspace.zig");
 const GridSize = @import("core/geometry.zig").GridSize;
 
@@ -30,6 +31,11 @@ pub const AiAgentOpenStatus = enum {
 pub const AiAgentOpenFn = *const fn (ctx: *anyopaque, request_id: []const u8) void;
 pub const TransportSendFn = *const fn (ctx: *anyopaque, message: []const u8) void;
 
+pub const ImagePasteSink = struct {
+    authorize: *const fn (ctx: *anyopaque, identity: terminal_control.Identity) image_paste.Authorization,
+    enqueue: *const fn (ctx: *anyopaque, identity: terminal_control.Identity, target: image_paste.Target, text: []const u8) image_paste.Status,
+};
+
 const SurfaceSink = struct {
     id: [16]u8,
     ctx: *anyopaque,
@@ -38,6 +44,7 @@ const SurfaceSink = struct {
         terminal: struct {
             write: TerminalWriteFn,
             control: ?TerminalControlFn,
+            paste_image: ?ImagePasteSink,
         },
     },
 };
@@ -303,8 +310,13 @@ pub const Hub = struct {
         ctx: *anyopaque,
         write: TerminalWriteFn,
         control: ?TerminalControlFn,
+        paste_image: ?ImagePasteSink,
     ) void {
-        self.registerSink(.{ .id = surface_id, .ctx = ctx, .handler = .{ .terminal = .{ .write = write, .control = control } } });
+        self.registerSink(.{
+            .id = surface_id,
+            .ctx = ctx,
+            .handler = .{ .terminal = .{ .write = write, .control = control, .paste_image = paste_image } },
+        });
     }
 
     fn registerSink(self: *Hub, next: SurfaceSink) void {
@@ -383,6 +395,10 @@ pub const Hub = struct {
     }
 
     fn handleMessage(self: *Hub, message: []const u8, from_relay: bool) void {
+        if (isJsonMessageType(message, image_paste.wire_type)) {
+            if (from_relay) self.handleRelayImagePaste(message);
+            return;
+        }
         if (isJsonMessageType(message, "workspace-action")) {
             if (from_relay) {
                 const request = workspace.parse(self.allocator, message) orelse return;
@@ -413,6 +429,80 @@ pub const Hub = struct {
             const request_id = extractJsonString(message, "requestId") orelse return;
             self.dispatchAiAgentOpen(request_id);
         }
+    }
+
+    fn handleRelayImagePaste(self: *Hub, message: []const u8) void {
+        if (message.len > image_paste.max_message_bytes) return;
+        const parsed = std.json.parseFromSlice(image_paste.Wire, self.allocator, message, .{}) catch return;
+        defer parsed.deinit();
+        const wire = parsed.value;
+        if (!std.mem.eql(u8, wire.type, image_paste.wire_type) or
+            !image_paste.validRequestId(wire.requestId) or !image_paste.validClientId(wire.clientId)) return;
+
+        const status = self.pasteRelayImage(wire);
+        const result = std.json.Stringify.valueAlloc(self.allocator, .{
+            .type = "terminal-image-paste-result",
+            .requestId = wire.requestId,
+            .clientId = wire.clientId,
+            .status = @tagName(status),
+        }, .{}) catch return;
+        defer self.allocator.free(result);
+        self.broadcast(result);
+    }
+
+    fn pasteRelayImage(self: *Hub, wire: image_paste.Wire) image_paste.Status {
+        if (!wire.validSurface()) return .invalid;
+        const identity = wire.identity() orelse return .denied;
+        const image = image_paste.decode(self.allocator, wire) catch |err| return switch (err) {
+            error.InvalidImage => .invalid,
+            error.OutOfMemory => .failed,
+        };
+        defer self.allocator.free(image.bytes);
+
+        const target = switch (self.authorizeImagePaste(wire.surfaceId, identity)) {
+            .accepted => |target| target,
+            .denied => return .denied,
+            .unsupported => return .unsupported,
+        };
+        // File I/O happens outside the sink and terminal locks. The surface
+        // may be removed or its lease changed while the file is being staged.
+        const attachment = image_paste.stage(self.allocator, image, target.kind) catch return .failed;
+        const status = self.enqueueImagePaste(wire.surfaceId, identity, target, attachment.paste_text);
+        attachment.deinit(self.allocator, status == .queued);
+        return status;
+    }
+
+    fn authorizeImagePaste(
+        self: *Hub,
+        surface_id: []const u8,
+        identity: terminal_control.Identity,
+    ) image_paste.Authorization {
+        self.sinks_mutex.lock();
+        defer self.sinks_mutex.unlock();
+        const sink = self.findImageSinkLocked(surface_id) orelse return .unsupported;
+        return sink.handler.terminal.paste_image.?.authorize(sink.ctx, identity);
+    }
+
+    fn enqueueImagePaste(
+        self: *Hub,
+        surface_id: []const u8,
+        identity: terminal_control.Identity,
+        target: image_paste.Target,
+        text: []const u8,
+    ) image_paste.Status {
+        self.sinks_mutex.lock();
+        defer self.sinks_mutex.unlock();
+        const sink = self.findImageSinkLocked(surface_id) orelse return .unsupported;
+        return sink.handler.terminal.paste_image.?.enqueue(sink.ctx, identity, target, text);
+    }
+
+    fn findImageSinkLocked(self: *Hub, surface_id: []const u8) ?SurfaceSink {
+        for (self.surface_sinks.items) |sink| {
+            if (!std.mem.eql(u8, &sink.id, surface_id)) continue;
+            if (sink.handler == .terminal and sink.handler.terminal.paste_image != null) return sink;
+            break;
+        }
+        return null;
     }
 
     fn handleWorkspaceRequest(self: *Hub, request: WorkspaceRequest) void {
@@ -769,7 +859,7 @@ test "only the relay path supplies lease identity to terminal sinks" {
     var sink: Sink = .{};
     var hub = Hub.init(std.testing.allocator);
     defer hub.deinit();
-    hub.registerTerminalSurface("0000000000000001".*, &sink, Sink.write, Sink.control);
+    hub.registerTerminalSurface("0000000000000001".*, &sink, Sink.write, Sink.control, null);
     const acquire = "{\"type\":\"terminal-control\",\"surfaceId\":\"0000000000000001\",\"clientId\":\"owner\",\"action\":\"acquire\"}";
     const input = "{\"type\":\"input-bytes\",\"surfaceId\":\"0000000000000001\",\"clientId\":\"owner\",\"leaseId\":1,\"data\":\"41\"}";
     hub.handleIncomingMessage(acquire);
@@ -948,4 +1038,68 @@ test "decode input message bytes" {
     defer allocator.free(bytes);
 
     try std.testing.expectEqualSlices(u8, "\r\x1b[A", bytes);
+}
+
+test "terminal image paste denies LAN and missing leases before staging and removes a rejected attachment" {
+    const allocator = std.testing.allocator;
+    const owner = "f9615093-77ee-4431-bfed-ab436d8510d3";
+    const Sink = struct {
+        authorized: usize = 0,
+        path: ?[]u8 = null,
+        staged_valid_image: bool = false,
+
+        fn write(_: *anyopaque, _: []const u8, _: terminal_control.Identity) void {}
+
+        fn authorize(ctx: *anyopaque, identity: terminal_control.Identity) image_paste.Authorization {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.authorized += 1;
+            if (!std.mem.eql(u8, identity.client_id.?, owner) or identity.lease_id != 9) return .denied;
+            return .{ .accepted = .{ .kind = .local, .epoch = 13 } };
+        }
+
+        fn enqueue(ctx: *anyopaque, _: terminal_control.Identity, target: image_paste.Target, text: []const u8) image_paste.Status {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (target.epoch != 13) return .failed;
+            self.path = allocator.dupe(u8, std.mem.trim(u8, text, "\"")) catch return .failed;
+            const contents = std.fs.cwd().readFileAlloc(allocator, self.path.?, 64) catch return .failed;
+            defer allocator.free(contents);
+            self.staged_valid_image = std.mem.eql(u8, contents, "\x89PNG\r\n\x1a\n");
+            return .denied; // The lease can change while the temporary file is written.
+        }
+    };
+
+    var hub = Hub.init(allocator);
+    defer hub.deinit();
+    var receiver: TestTransport = .{ .allocator = allocator };
+    defer receiver.deinit();
+    hub.addTransport(&receiver, TestTransport.send);
+    var sink: Sink = .{};
+    defer if (sink.path) |path| {
+        std.fs.deleteFileAbsolute(path) catch {};
+        allocator.free(path);
+    };
+    hub.registerTerminalSurface("0000000000000001".*, &sink, Sink.write, null, .{ .authorize = Sink.authorize, .enqueue = Sink.enqueue });
+    const prefix =
+        \\{"type":"terminal-image-paste","requestId":"paste-9","surfaceId":"0000000000000001","clientId":"
+    ;
+    const payload = prefix ++ owner ++ "\",\"mime\":\"image/png\",\"data\":\"iVBORw0KGgo=\"";
+    hub.handleIncomingMessage(payload ++ ",\"leaseId\":9}");
+    try std.testing.expectEqual(@as(usize, 0), receiver.received.items.len);
+    hub.handleRelayMessage(payload ++ "}");
+    try std.testing.expectEqual(@as(usize, 0), sink.authorized);
+    const result =
+        \\{"type":"terminal-image-paste-result","requestId":"paste-9","clientId":"
+    ;
+    const denied = result ++ owner ++ "\",\"status\":\"denied\"}";
+    try std.testing.expectEqualStrings(denied, receiver.received.items[0]);
+
+    hub.handleRelayMessage(payload ++ ",\"leaseId\":10}");
+    try std.testing.expectEqual(@as(usize, 1), sink.authorized);
+    try std.testing.expect(sink.path == null);
+    try std.testing.expectEqualStrings(denied, receiver.received.items[1]);
+
+    hub.handleRelayMessage(payload ++ ",\"leaseId\":9}");
+    try std.testing.expect(sink.staged_valid_image);
+    try std.testing.expectError(error.FileNotFound, std.fs.accessAbsolute(sink.path.?, .{}));
+    try std.testing.expectEqualStrings(denied, receiver.received.items[2]);
 }

@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { browserWorkspaceAction, hostWorkspaceResult } from "./server/workspace_protocol.js";
 import { browserTabControl, hostTabControlState, browserTerminalMessage, hostTerminalMessage, type TerminalGridMessage } from "./server/terminal_control_protocol.js";
+import { browserTerminalImage, hostTerminalImageResult } from "./server/terminal_image_protocol.js";
 
 type Env = {
   ASSETS: Fetcher;
@@ -84,6 +85,14 @@ export class RemoteSession extends DurableObject<Env> {
         }
         return;
       }
+      if (message.type === "terminal-image-paste-result") {
+        const result = hostTerminalImageResult(message);
+        if (result) {
+          const { clientId, ...browserResult } = result;
+          this.sendBrowser(clientId, browserResult);
+        }
+        return;
+      }
       if (message.type === "output" && typeof message.data === "string") {
         this.broadcast({ type: "output", data: message.data });
       } else if (message.type === "output-bytes" && typeof message.data === "string") {
@@ -144,6 +153,13 @@ export class RemoteSession extends DurableObject<Env> {
         const action = browserWorkspaceAction(message, clientId);
         if (action && (!this.wispterm || !safeSend(this.wispterm, action))) {
           this.sendBrowser(clientId, { type: "workspace-action-result", requestId: action.requestId, status: "offline" });
+        }
+        return;
+      }
+      if (message.type === "terminal-image-paste") {
+        const image = browserTerminalImage(message, clientId);
+        if (image && (!this.wispterm || !safeSend(this.wispterm, image))) {
+          this.sendBrowser(clientId, { type: "terminal-image-paste-result", requestId: image.requestId, status: "offline" });
         }
         return;
       }

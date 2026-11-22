@@ -7,6 +7,7 @@ import ts from "typescript";
 import { RemoteSession } from "../../src/server/session.js";
 import * as workspaceProtocol from "../../src/server/workspace_protocol.js";
 import * as terminalProtocol from "../../src/server/terminal_control_protocol.js";
+import * as imageProtocol from "../../src/server/terminal_image_protocol.js";
 
 class Socket {
   readyState = 1;
@@ -38,6 +39,7 @@ function workerSession(): { attachWispTerm(s: Socket): void; attachBrowser(s: So
       if (name === "cloudflare:workers") return { DurableObject: class {} };
       if (name === "./server/workspace_protocol.js") return workspaceProtocol;
       if (name === "./server/terminal_control_protocol.js") return terminalProtocol;
+      if (name === "./server/terminal_image_protocol.js") return imageProtocol;
       throw new Error(`unexpected import ${name}`);
     },
   });

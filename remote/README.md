@@ -308,6 +308,15 @@ rail, or mobile toolbar to add a pane, delete the tab, or transfer control.
 The mouse wheel or a vertical touch swipe scrolls the terminal's history.
 Mirrored splits highlight the pane selected for interaction.
 
+### Paste images
+
+Paste a PNG or JPEG up to 4 MiB into a controlled Windows or WSL terminal.
+The browser sends the pasted image to WispTerm. WispTerm saves it in the desktop
+user's temporary folder and pastes the path visible to that terminal. Codex can
+attach the file in its composer. The paste leaves the message ready to review.
+For a WispTerm terminal on Windows itself, use **Ctrl+Shift+V** to paste an image
+from the Windows clipboard.
+
 ### Workspace actions
 
 Desktop layouts advertise `workspaceActions: true`. Editable terminal tabs
