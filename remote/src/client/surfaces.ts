@@ -35,6 +35,7 @@ import { currentTab, inputLeaseId, resetSurfaceViews, state, tabControlId } from
 import { getTerminalPalette, subscribeToTheme } from "./theme";
 import { REMOTE_TERMINAL_SCROLLBACK } from "./terminal_options";
 import { mapScaledTerminalPointer } from "./terminal_pointer";
+import { bindAlternateScreenResize } from "./terminal_resize";
 import { supportedTerminalGrid, terminalControl, type TerminalControlTarget } from "./terminal_control";
 import { tabControl } from "./tab_control";
 import { workspaceGeometry } from "./workspace_layout";
@@ -157,6 +158,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     scrollback: REMOTE_TERMINAL_SCROLLBACK,
     theme: getTerminalPalette(),
   });
+  bindAlternateScreenResize(term);
   term.loadAddon(fit);
 
   const view: SurfaceView = {

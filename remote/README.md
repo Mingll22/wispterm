@@ -276,6 +276,11 @@ VT cell colors and input modes when the browser first connects:
 { "type": "layout", "activeTab": 0, "tabs": [{ "surfaces": [{ "cols": 120, "rows": 32, "cursorX": 0, "cursorY": 31, "snapshot": "..." }] }] }
 ```
 
+Codex draws its composer background after receiving the desktop terminal's
+OSC 10 and 11 color replies. On Windows builds whose system ConPTY drops
+these queries, use the WispTerm `portable-compat` console host with
+`windows-conpty = auto`. Start a new Codex session after loading that host.
+
 Browser input is routed back to the selected surface:
 
 ```json
