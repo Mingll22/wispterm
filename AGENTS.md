@@ -1,256 +1,69 @@
-# AGENTS.md
+# WispTerm project instructions
 
-## Overview
+WispTerm is a Zig terminal emulator built on libghostty-vt. Windows is the
+primary desktop target. macOS is supported and Linux is experimental.
+`remote/` owns the browser console and relay.
+For platform support questions, check [known limitations](KNOWN_ISSUES.md)
+and the [roadmap](ROADMAP.md).
 
-WispTerm is a terminal emulator written in Zig, shipping desktop builds for Windows and macOS, plus an experimental Linux AppImage. It uses [libghostty-vt](https://github.com/ghostty-org/ghostty) (Ghostty's VT parser and terminal state machine) for terminal emulation, with its own rendering pipeline (D3D11/Metal/OpenGL + FreeType, plus DirectWrite/CoreText/fontconfig for font discovery by platform).
+## Desktop work
 
-Windows is the **primary and default development target** (`x86_64-windows-gnu`), and day-to-day development happens on Windows in PowerShell. Platform-specific code lives behind narrow interfaces in `src/platform/` (per-platform implementations plus `_unsupported`/`_posix` stubs) so macOS and Linux can share the terminal core. macOS is an active supported desktop build that is still stabilizing; Linux is experimental. See `ROADMAP.md` for future work and `KNOWN_ISSUES.md` for current platform limitations.
+- For desktop plans and feature changes, inspect the relevant Ghostty source
+  with `gh` and describe its behavior in the design or change notes. Follow
+  its config, theme, color, and cursor conventions where applicable. Use the
+  [reference map](docs/decoupling-guide.md#7-ghostty-cross-reference) when
+  choosing the counterpart and [build.zig.zon](build.zig.zon) when changing
+  the pinned VT dependency.
+- Before changing a platform seam or adding a host, read the
+  [host and capability contracts](docs/architecture.md#the-host-interface-srcplatformwindow_backendzig).
+  Keep OS access behind `src/platform/` facades. Keep feature state and behavior
+  in their [owning domains](docs/architecture.md#integration-layer-vs-feature-domains)
+  when editing AppWindow, input, or the overlay facade.
+- When adding or changing a desktop screen, use the
+  [three shared UI patterns](docs/architecture.md#desktop-ui-patterns). Every
+  overlay or panel input that changes UI state must request a repaint through
+  [UiEffect](docs/architecture.md#event-driven-repaint).
+- When editing a watched integration or session file, move existing debt to the
+  owning layer and lower its matching
+  [source guard](docs/decoupling-guide.md#82-the-boundary-guards-srcsource_guards).
+  To find a feature owner or move files, consult the
+  [source layout guide](docs/source-layout.md).
+- When changing a shortcut, synchronize the
+  [README shortcut table](README.md#keyboard-shortcuts) and matching startup
+  and command palette hints identified in the
+  [shortcut guide](docs/development.md#keyboard-shortcut-changes).
+- When implementing a plan under `plans/`, follow its agreed scope and get the
+  user's consent before deviating. If the work is too large, split it with the user.
 
-## Architecture
+## Development and verification
 
-WispTerm is split into a platform-agnostic **core** (terminal state, IO, rendering) and a per-platform **host** (window, event loop, input) that drives the core through a narrow surface API. The host interface is `src/platform/window_backend.zig`; OS facilities go through capability facades in `src/platform/`. The named contract — what the host implements, what services it supplies, and the invariants that keep the seam intact — is documented in [docs/architecture.md](docs/architecture.md). Read it before touching the platform boundary or starting a port.
+- Target `dev` when integrating changes in this fork. For upstream
+  submissions, follow [CONTRIBUTING.md](CONTRIBUTING.md).
+- For desktop development, use direct Zig commands in Windows PowerShell.
+  Use `zig build` for development and reserve `ReleaseFast` for shipping.
+  See [building](docs/development.md#building) for the default target,
+  toolchain source, and artifact checks.
+- For desktop logic, use `zig build test` in the inner loop and run
+  `zig build test-full` before integration. For platform-coupled tests or
+  adding tests to the fast suite, read the
+  [test scope and target rules](docs/development.md#tests-and-structural-guards).
+- For Windows UI behavior, use a real visible app and
+  [Win32 automation from PowerShell](docs/development.md#windows-ui-automation).
+  For sluggish input, use the [frame probe](docs/development.md#frame-latency-diagnostics).
+  For file adds, removals, renames, or moves, run the
+  [Windows checkout checks](docs/development.md#windows-checkout-safety).
+- For SSH/SCP changes, follow the [Windows OpenSSH rules](docs/development.md#windows-sshscp-compatibility)
+  for real-profile verification, independent helper connections, and stderr.
+  For configuration changes, use the [config reference](docs/configuration.md)
+  for precedence, paths, and hot reload.
 
-### UI presentation styles
+## Remote and releases
 
-WispTerm has exactly three application UI styles. Choose one before adding a screen; do not create a fourth ad-hoc overlay shape. The shared geometry contract is `src/renderer/ui_patterns.zig`. It is intentionally pure and is included in the fast test suite.
-
-| Style | Use for | Required structure | Examples |
-|---|---|---|---|
-| **Command palette** | Find-and-run actions with no persistent form state | Search field, filtered and scrollable action list, visible selection, shortcut/meta column, Escape closes. Keep it transient; do not put multi-step configuration here. | Command Center, Copilot History picker |
-| **Form dialog** | Small configuration, profile editing, confirmation, and launch choices | Centered constrained dialog, title plus one-line instruction, aligned rows/fields, explicit primary and cancel/close actions. Must fit inside viewport gutters at every size. | New Session, AI/SSH/MCP forms |
-| **Workbench page** | Persistent tab-owned tools with browsing, status, or multi-column content | Header, content region, and a full-width footer/status band. Empty states explain why the page is empty and name the next action. Keyboard hints and non-blocking status belong in the footer/status band, never squeezed into a content column. | Settings, Memory Center, Skill Center, Port Forwarding, Agent History |
-
-This follows Ghostty's separation of its command palette dialog from its persistent window/tab shell: Ghostty's palette has a search entry and a scrollable rich list with shortcut metadata, while tabs live in a stable window container. WispTerm uses its GPU renderer rather than GTK, but should preserve that same separation of transient command execution, form input, and persistent workspace state.
-
-When changing a UI page, verify: full labels are visible or deliberately ellipsized with a way to reveal them; the localized UI language is consistent (proper names/model IDs may remain literal); state is placed next to its owner; and the page requests a repaint through `UiEffect` after input changes.
-
-## Cohesion and coupling
-
-These are the **primary** architectural criteria. File length is a symptom, not the rule.
-
-A file may be large when it owns one coherent domain object and exposes a clear API. Ghostty-style large terminal-core files are acceptable because their responsibilities are narrow and their state ownership is explicit — Ghostty ships `terminal/PageList.zig` (~14.8k lines), `terminal/Terminal.zig` (~13.3k), `config/Config.zig` (~10.9k), and `terminal/Screen.zig` (~10.5k) with no scattered module globals. The smell we guard against is **responsibility entanglement**: UI presentation mixed with business mutation, input dispatch mixed with rendering, global mutable state scattered across facades, and one file becoming an import hub for unrelated features. WispTerm's largest files are smaller than Ghostty's yet harder to change because they carry all of those at once.
-
-The goal is not small files but code that can be **understood, tested, and changed locally**. Large-but-cohesive is fine; large-but-tangled must be split. New features should prefer focused modules over growing existing hub files. New UI state must live in an explicit state struct or a feature-owned module — never as another top-level `g_*` / `threadlocal` field in `AppWindow.zig`, `input.zig`, or `renderer/overlays.zig`.
-
-### Integration layer vs feature domains
-
-`AppWindow.zig`, `input.zig`, and `renderer/overlays.zig` are an **integration layer**, not terminal "core". They *coordinate* features — AppWindow assembles modules and routes render/input, `input.zig` dispatches events, `overlays.zig` is the overlay facade/registry — but they must **not own feature state**. The **feature domains** own their own state, query/action APIs, and tests: `assistant/conversation/*`, `assistant/loop/*`, `agent/*`, `agent_tools/*`, `terminal_agents/*`, `weixin/*`, `skill/`, `file_explorer.zig`, `tmux/*`, and the remote client/sync code.
-
-When writing new code: feature domains should not depend on `AppWindow` (expose an API, receive context explicitly); `input.zig` only dispatches and returns a `UiEffect` — it must not read a feature's internal `g_*` state; overlays get capabilities through a Host/Context, not by importing `AppWindow.zig`. Prefer explicit context structs, feature-owned query/action APIs, and `UiEffect` returns. **Each time you touch a watched integration/session file, lower the matching source-guard ratchet** — that is how the boundary converges. The full layer model and per-edge rules are in [docs/architecture.md](docs/architecture.md#integration-layer-vs-feature-domains) and [docs/decoupling-guide.md §8.5](docs/decoupling-guide.md#85-the-layer-model).
-
-### Boundary guards (`src/source_guards/`)
-
-Structural debt is frozen mechanically by source-scanning ratchet tests (the same `@embedFile`-scan idiom as `input/dirty_guard.zig`). They run in `zig build test` and, because `test-full` is now a superset of `test`, in the pre-merge gate too. Each freezes a count at today's value; the count may only **shrink**. To add a case you must first remove one elsewhere — or, better, use the pattern the guard points you to.
-
-| Guard | Freezes | Today's ceiling | Escape hatch |
-|---|---|---|---|
-| `file_size_guard` | lines in any `src/**/*.zig` | < **10,000** (also `zig build check-sizes`) | split by responsibility; never raise the limit |
-| `global_state_guard` | top-level `g_*` / `threadlocal` in the watched integration/session files | AppWindow **66**, input **39**, overlays **21**, assistant/conversation/session **8** | put new state in a state struct (`appwindow/state.zig`, …) |
-| `import_hub_guard` | `pub const X = @import(...)` re-exports in `AppWindow.zig` | **16** | import the real module directly, not via `AppWindow.X` |
-| `side_effect_guard` | direct `g_force_rebuild` / `g_cells_valid` writes in the watched integration/session files | AppWindow **24**, input **4**, overlays **0**, assistant/conversation/session **0** | return a `UiEffect`, land it through `AppWindow.applyUiEffect` |
-| `objc_autorelease_guard` | exported `.m` bridge functions that send Objective-C messages outside `@autoreleasepool` (macOS has no outer pool: no `NSApplicationMain`) | **0** (allowlist: one deliberate test probe) | wrap the Objective-C part in `@autoreleasepool { }` |
-| `tab_state_init_guard` | `create(TabState)` sites initialized field by field (`allocator.create` returns undefined memory and piecewise init skips declaration defaults) | **0** | initialize with one struct literal: `t.* = .{ ... }` |
-
-The 10,000-line guard is a **runaway tripwire, not a health metric**: `check-sizes` prevents uncontrolled growth, it does not certify architectural health. A file under it can still be tangled; treat any file over **5,000 lines** as a signal to review responsibility, dependency direction, state ownership, and test boundaries. The boundary ratchets — not the line count — are the primary enforcement mechanism.
-
-A **layered-dependency** guard (`layered_dependency_guard`) already freezes one edge: `termio/**` must not import `renderer/**`. Extending it to more edges (e.g. `renderer/overlays/*` must not import `AppWindow.zig`; `input/*` must not import a concrete renderer) is the documented next step; each needs a per-edge allowlist and lands once the boundary it asserts has converged. The layer model and the full remediation roadmap (state structs first, then import-hub, then per-domain file splits) live in [docs/decoupling-guide.md](docs/decoupling-guide.md).
-
-## Hard Rules
-
-When changing application **keyboard shortcuts** (bindings in `src/input.zig` and related input paths), **update `README.md`** so the [Keyboard shortcuts](README.md#keyboard-shortcuts) section stays accurate. Also update user-visible shortcut text in `src/renderer/overlays.zig` (startup overlay, command palette entries) when those strings describe the same bindings.
-
-The main render loop is **event-driven** (`src/appwindow/render_gate.zig`): a frame is drawn only when `frameNeedsRender` is true, and `overlays.anyOverlayActive()` deliberately excludes statically-open overlays (command palette / command center, session launcher / new session, settings page) to keep idle CPU low. Therefore, any **overlay or panel key/char handler** in `src/input.zig` (`handleKey`/`handleChar`) that mutates UI state — selection index, filter text, focus — **must request a repaint**, or the change paints only on the next incidental wake (cursor blink ~530ms, mouse move) and navigation visibly lags ("不跟手") identically on Windows and macOS — it is shared logic, not platform code.
-
-The mechanism is the **UI-effect boundary**, not a direct global write. Input dispatch returns a `UiEffect` (`src/appwindow/ui_effect.zig`: `consumed` / `needs_rebuild` / `cells_invalid` / `wake_backend`), and `input.zig` lands it through `requestInputRepaint()` / `requestInputRebuild()` / `applyInputEffect()`, which funnel into the single sink `AppWindow.applyUiEffect` — the only place that touches `g_force_rebuild` / `g_cells_valid` (and `window_backend.postWakeup()` for a worker thread, via `UiEffect{ .wake_backend = true }`). New or converted handlers **must return/route a `UiEffect`** and **must not write `AppWindow.g_force_rebuild` / `AppWindow.g_cells_valid` directly**: `src/input/dirty_guard.zig` enforces this on the converted regions of `input.zig`, and `src/source_guards/side_effect_guard.zig` freezes the remaining direct-write count per watched file so it can only shrink. Legacy direct writes survive only where already counted by that ratchet.
-
-These `input.zig` compiled tests run only in the full app test binary (`zig build test-full`, and `zig build test-macos-ui` on macOS); the fast `zig build test` suite does **not** compile `input.zig` (the source-scan guards `@embedFile` it as text instead). Because `test-full` now also runs the fast suite, those guards gate the pre-merge build.
-
-When publishing a new **desktop app version**, keep the desktop version surfaces synchronized before tagging or releasing: `build.zig.zon`, matching tests, release notes under `release-notes/`, package `version.txt` output, `wispterm.exe --version`, and the command center `Version` entry. The compiled desktop app reads its version from `build.zig.zon` through `build_options.app_version`; do not hard-code a second desktop version constant.
-
-Do **not** change version files under `remote/` (`remote/package.json`, `remote/package-lock.json`, `remote/src/client/version.ts`, or the WispTerm Remote web UI version label) unless the user explicitly says the remote web console is part of the release. When a remote release is explicitly requested, keep those remote version surfaces synchronized, and ensure the web UI renders its release version via `remoteBrandMarkup()`/`webVersionLabel()` on both login and console shells, even when a build-time label is injected.
-
-When working on implementing a plan from the plans directory:
- * never deviate from the plan without asking for clear consent
- * never deem something too big and choosing not to do it in the name of pragmatism
- * always ask if you have trouble because something is too big, we will break it down together and work on it step by step
-
-## Planning
-
-When planning, always compare what we are planning to do with https://github.com/ghostty-org/ghostty.
-This is the gold standard, we want to be as close to their implementation as possible.
-
-Use the github cli gh to browse https://github.com/ghostty-org/ghostty and always add descriptions on how ghostty does things. 
-
-Exception: work under `remote/` is WispTerm's own web remote console and relay implementation. Ghostty does not have an equivalent feature, so `remote/` planning and implementation **does not need to compare against or reference Ghostty**. For `remote/`, follow the existing `remote/` architecture, browser platform constraints, and the user-approved design/plan for that feature.
-
-## Build Commands
-
-Develop on Windows in PowerShell with direct `zig` commands (do not assume non-PowerShell tooling). Use `zig build` for development; only use `zig build -Doptimize=ReleaseFast` for final/shipping builds. `build.zig` defaults to `x86_64-windows-gnu`. Full build commands, the required Zig toolchain version, and artifact checks live in [docs/development.md](docs/development.md#building).
-
-Tests have two steps. `zig build test` is the fast inner loop: it builds and runs only platform-independent logic modules (`src/test_fast.zig`) against the native host — sub-second when cached, and it does **not** recompile the heavy `test_main` binary (the full app plus `ghostty-vt`/`xev`). `zig build test-full` runs the complete suite (shared compile checks + the app test binary) and is the pre-merge gate; run it before finishing a change. A single pure module can be run directly with `zig test src/<module>.zig`. When you add a unit-tested, platform-independent module, list it in `src/test_fast.zig`; keep target-coupled tests (which assert Windows behavior) out of the fast suite or guard them with `if (builtin.os.tag != .windows) return error.SkipZigTest;`.
-
-## Frame-latency diagnostics
-
-To quantify input responsiveness — e.g. the overlay arrow-key "feel" gated by the event-driven render loop (see the Hard Rule above) — use the opt-in frame-latency probe. Enable it with `wispterm-debug-render = true` in the config file, or `WISPTERM_RENDER_DIAGNOSTICS=1` **in the app process's own environment**. On macOS, `open Foo.app` launches via launchd and does **not** inherit your shell env, so either use the config key or run the bundle binary directly (`WISPTERM_RENDER_DIAGNOSTICS=1 ./zig-out/bin/WispTerm.app/Contents/MacOS/WispTerm`). The log lands at `%APPDATA%\wispterm\render-diagnostic.log` (Windows) / `~/Library/Application Support/wispterm/render-diagnostic.log` (macOS); `grep frame-latency` it while navigating.
-
-Two line kinds: `frame-latency input->present count=N p50/p95/max=..ms` is genuine same-iteration input→present latency (the CPU pipeline wake → process → layout → draw-submit; it excludes the inherent ~1–2 frame vblank/compositor latency, so healthy is single-digit ms). `frame-latency STALL input->present=..ms iters=K (...)` is an input that painted nothing in its own loop iteration — a no-render key (bare modifier / unfocused), or a handler that forgot to mark the UI dirty — and is kept out of the p50/p95 stats. **A STALL that fires the instant you press a navigation key inside an overlay means a handler is missing its repaint `UiEffect` (the event-driven Hard Rule regression); a sporadic STALL on stray non-navigation keys is harmless.** Pure stats live in `src/appwindow/frame_latency.zig` (unit-tested, in the fast suite); the main-loop wiring + the input→render-gate regression tests are in `src/AppWindow.zig` / `src/input.zig`.
-
-## Windows UI Automation
-
-When debugging UI behavior, automate WispTerm as a real visible Windows app from PowerShell using Win32-driven automation rather than shell-only assumptions. The checked-in scripts and conventions are in [docs/development.md](docs/development.md#windows-ui-automation).
-
-## Windows SSH/SCP Compatibility
-
-When changing SSH/SCP code paths (`src/ssh/scp.zig`, SSH clipboard image paste, remote file explorer, or SSH session metadata), test against the real profile in `%APPDATA%\wispterm\ssh_hosts` when available — but never print or commit the password. Two hard rules: do **not** add OpenSSH connection sharing (`ControlMaster`/`ControlPersist`/`ControlPath`) to helper `ssh.exe`/`scp.exe` commands (it breaks SCP on Windows OpenSSH), and keep the underlying OpenSSH stderr visible rather than collapsing it to a generic failure. Test commands and the full rationale are in [docs/development.md](docs/development.md#windows-sshscp-compatibility).
-
-## Windows Development Compatibility
-
-This repository must remain safe to check out and develop on Windows. Before finishing changes that add, remove, rename, or move files, run the Windows path-safety checks — reserved names, illegal characters, case-fold collisions, symlinks, and path length — documented in [docs/development.md](docs/development.md#windows-checkout-safety).
-
-## Project Structure
-
-```
-src/                         # Desktop terminal application
-├── main.zig                 # Entry point and main loop
-├── App.zig                  # Application-level state, config reload, remote client lifecycle
-├── AppWindow.zig            # Window-level tabs, splits, rendering and input routing
-├── Surface.zig              # Per-terminal surface state and PTY integration
-├── input.zig                # Keyboard/mouse shortcuts and command dispatch
-├── config.zig               # Config loading (file + CLI), theme resolution, key=value parser
-├── config_watcher.zig       # Config hot-reload (platform watchers live in src/platform/)
-├── pty.zig                  # App-facing PTY API (re-exports src/platform/pty.zig)
-├── remote_client.zig        # Outbound WispTerm Remote relay client
-├── file_explorer.zig        # Local/SSH file explorer state and operations
-├── themes.zig               # Embedded Ghostty-compatible themes
-├── assistant/               # AI conversation session/protocol/composer plus loop,
-│                            #   profile, sidebar-owned state, prompt queue
-│                            #   (prompt_queue.zig/session_queue.zig), and session
-│                            #   forking (fork.zig)
-├── agent/                   # Agent config, access rules, history, and memory
-├── agent_tools/             # Model tool-call runtime adapters
-├── terminal_agents/         # External terminal agent detection/prompts/sessions
-│                            #   (Codex / Claude Code / Kimi Code / OpenCode history);
-│                            #   screen-state detection = herdr's manifests/*.toml
-│                            #   (Apache-2.0, vendored verbatim) + screen_manifest /
-│                            #   screen_regex / manifest_toml engines + screen_detect
-├── command/                 # Command center/palette model and registry
-├── recipe/                  # Named workspace recipes: store, naming form, palette list state
-├── preview/                 # Preview pane, gallery, diagnostics, PDF/markdown/png
-├── browser/                 # Embedded browser panel and URL handling
-├── html/                    # Local HTML server and server model
-├── jupyter/                 # Jupyter server detection and picker state
-├── skill/                   # Skill center, install, registry, scan, transfer
-├── port_forward/            # Port-forward rules, manager, and forwarding runtime
-├── research/                # Web/PubMed/read helpers used by assistant tools
-├── tools/                   # First-party assistant tool catalog and registry
-├── platform/                # Platform abstraction layer: narrow capability
-│                            #   interfaces with per-platform impls (_windows) and
-│                            #   _unsupported/_posix stubs — PTY/process, window/input
-│                            #   backends, font discovery, clipboard, file dialogs,
-│                            #   remote transport, embedded browser, updater, etc.
-├── appwindow/               # AppWindow decomposition: aggregated state model
-│                            #   (state.zig / window_state / remote_state), feature
-│                            #   bridges (weixin/agent/remote_sync), control API,
-│                            #   surface snapshots, the UiEffect boundary, tab/split
-├── input/                   # Input pipeline split out of input.zig: command
-│                            #   dispatch, UiEffect helpers, hit-test, preview/path,
-│                            #   plus source-scan guards (dirty/overlay effect)
-├── apprt/                   # Win32/windowing support code
-├── font/                    # Font manager, atlas, embedded fallback, sprite glyphs
-├── renderer/                # GPU backends, cell renderer, overlays, titlebar, panels
-├── source_guards/           # Cross-cutting architecture ratchets: file-size backstop
-│                            #   + global-state / import-hub / side-effect freezes
-├── ssh/                     # SSH/SCP descriptors, profile store, prompts, tunnels,
-│                            #   OpenSSH config import, and transfer helpers
-├── tmux/                    # tmux control-mode session, layout and pane IO
-├── chatops/                 # Shared chat-bridge router/control for WeChat and Feishu
-├── weixin/                  # WeChat (iLink) bot bridge: poller, client, QR login
-├── feishu/                  # Feishu/Lark bot bridge: long connection, REST, cards
-├── ctl/                     # Agent-control socket server and protocol (wisptermctl)
-├── sync/                    # Encrypted sync engine and transports (folder, WebDAV)
-├── credential/              # Password Store: vault, page state, redaction
-├── memory_center/           # Memory Center page state
-├── memory_digest/           # Scheduled digest of agent sessions into memory
-├── conversation_center/     # Conversation Center session state
-├── file_explorer/           # File explorer action types (state lives in file_explorer.zig)
-├── benchmark/               # Benchmark harness behind wispterm-bench
-├── themes/                  # Embedded Ghostty-compatible theme files
-├── ui/                      # Small shared UI metrics/helpers
-├── core/                    # Shared geometry types for layers below the renderer
-└── termio/                  # PTY read/write threads and terminal IO mailbox
-
-remote/                      # WispTerm-specific web remote console and relay
-├── src/client/              # Browser app: xterm surfaces, layout, virtual keyboard, styles
-│   ├── views/               # Login and remote console views
-│   └── styles/              # Base, console, responsive, token, and virtual keyboard CSS
-├── src/server/              # Node.js relay server for Docker/local hosting
-├── src/worker.ts            # Cloudflare Worker + Durable Object relay
-├── index.html               # Vite browser entry
-├── package.json             # Remote build/dev/typecheck scripts
-├── Dockerfile               # Container build for the Node relay
-├── docker-compose.yml       # Local/VPS Docker deployment helper
-├── nginx.conf.example       # Reverse proxy example for Docker deployment
-└── wrangler.toml.example    # Cloudflare deployment template
-
-docs/                        # Static website and generated/project documentation
-├── index.html
-├── zh.html
-├── style.css
-├── assets/
-└── superpowers/             # Approved design specs and implementation plans
-
-plans/                       # Project planning notes and historical implementation plans
-release-notes/               # Versioned release notes
-debug/                       # Test/debug scripts, including Windows UI automation
-packaging/windows/           # Windows installer and packaging scripts
-assets/                      # Application icon and source art
-shaders/                     # GLSL shader files
-tools/                       # Terminal helper scripts such as imgcat/pdfcat
-plugins/                     # Bundled skills (plugins/skills); future MCP assets live here
-pkg/                         # Vendored build dependencies (freetype, zlib, libpng, opengl, etc.)
-vendor/                      # Vendored source code
-```
-
-## Ghostty Reference
-
-WispTerm intentionally follows Ghostty's design and behavior for terminal emulator functionality. When implementing or modifying features in the main Zig terminal app, **cross-reference the Ghostty source** at https://github.com/ghostty-org/ghostty.
-
-This Ghostty reference requirement does **not** apply to `remote/`. The `remote/` directory contains WispTerm-specific web remote console and relay code; develop it from the existing remote codebase, web/mobile UX requirements, and local plans rather than trying to match Ghostty.
-
-Key mapping of WispTerm files to Ghostty counterparts:
-
-| WispTerm | Ghostty Reference | Notes |
-|---------|-------------------|-------|
-| `src/config.zig` | [`src/config/Config.zig`](https://github.com/ghostty-org/ghostty/blob/main/src/config/Config.zig) | Same `key = value` format, same key names where applicable |
-| `src/config_watcher.zig` | Ghostty's config reload mechanism | Hot-reload on file change |
-| `src/pty.zig` | [`src/os/ConPty.zig`](https://github.com/ghostty-org/ghostty/blob/main/src/os/ConPty.zig) | Windows ConPTY, Ghostty also has this for Windows |
-| `src/themes.zig` | [`src/config/theme.zig`](https://github.com/ghostty-org/ghostty/blob/main/src/config/theme.zig) | Same theme file format, same built-in theme collection |
-| `src/font/sprite/` | [`src/font/sprite/`](https://github.com/ghostty-org/ghostty/tree/main/src/font/sprite) | Box drawing, braille — follows Ghostty's sprite approach |
-| `src/font/embedded.zig` | Ghostty's embedded JetBrains Mono | Same fallback font |
-| `src/renderer/` (`Renderer.zig`, `cell_renderer.zig`, `gpu/{d3d11,metal,opengl}`) | [`src/renderer/`](https://github.com/ghostty-org/ghostty/tree/main/src/renderer) (`generic.zig`, `OpenGL.zig`, `Metal.zig`) | Cell grid, shaders, per-backend GPU code (D3D11 is WispTerm's own) |
-| `src/input.zig`, `src/apprt/{win32,sdl}.zig` | [`src/apprt/`](https://github.com/ghostty-org/ghostty/tree/main/src/apprt), [`src/input/`](https://github.com/ghostty-org/ghostty/tree/main/src/input) | Host key/mouse events and key encoding |
-| `src/platform/font_discovery_windows.zig` | [`src/font/discovery.zig`](https://github.com/ghostty-org/ghostty/blob/main/src/font/discovery.zig) | Font discovery (WispTerm uses DirectWrite directly on Windows) |
-
-When adding features:
-- Check how Ghostty implements it first
-- Match Ghostty's config key names and value formats
-- Follow Ghostty's conventions for theme files, color handling, cursor behavior, etc.
-- The VT parsing itself comes from Ghostty as a Zig dependency — don't reimplement terminal emulation
-
-## Config System
-
-Config lives at `%APPDATA%\wispterm\config`, is loaded defaults → config file → CLI flags (last wins), and hot-reloads via the file watcher (`Ctrl+,` to edit). Full details — path resolution order, portable profile, and all keys — are in [docs/configuration.md](docs/configuration.md).
-
-## Dependencies
-
-Defined in `build.zig.zon`:
-- **ghostty** — libghostty-vt (VT parser + terminal state) from a pinned Ghostty main-branch snapshot. Prefer pinning an exact commit tarball and matching hash over `main.tar.gz`, so builds are reproducible.
-- **z2d** — 2D graphics library (sprite font drawing)
-- **libxev** — event loop used by the terminal IO threads
-- **freetype** / **harfbuzz** / **fontconfig** / **zlib** / **libpng** — vendored build glue in `pkg/` (zlib and libpng are consumed through freetype)
-- **sdl** — SDL3, the window/input host for the experimental Linux build (`pkg/sdl`)
-- **apple-sdk** — locates the native Apple SDK for macOS builds (`pkg/apple-sdk`)
-
-OpenGL is loaded through the vendored glad loader in `vendor/glad`, not a Zig package. There is no GLFW dependency: the hosts are Win32 (`src/apprt/win32.zig`), AppKit (`src/platform/window_macos_bridge.m`) and SDL3 (`src/apprt/sdl.zig`).
-
-When updating Ghostty, expect API drift. The current main-branch API returns `void` from terminal operations such as `Terminal.vt`, `Stream.nextSlice`, and `Terminal.scrollViewport`; do not add `try` or `catch {}` around those calls unless the dependency version actually returns an error union.
+- For browser or relay work, read the [Remote guide](remote/README.md) for the
+  wire protocol and development checks. The Ghostty comparison is waived for
+  `remote/`. Follow the existing Remote architecture and the agreed Web and
+  mobile behavior.
+- Before changing version surfaces, read the
+  [desktop release checklist](docs/development.md#version-sources). Change
+  [Remote version surfaces](remote/README.md#remote-versions) only when the
+  user includes the Web console in the release.

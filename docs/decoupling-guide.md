@@ -92,13 +92,9 @@ two claims are split in the updated roadmap.
 
 **Gap 2 — Several UI files conflate presentation with business logic (Axis B).**
 
-These are WispTerm's largest files. None crosses the 10,000-line backstop, yet
-each is hard to change because it carries several roles at once — the problem is
-entanglement, not raw size. For contrast, Ghostty's largest files are *bigger*
-(`terminal/PageList.zig` ~14.8k lines, `terminal/Terminal.zig` ~13.3k,
-`config/Config.zig` ~10.9k, `terminal/Screen.zig` ~10.5k) but each owns one
-coherent domain object with explicit state ownership and no scattered module
-globals, so they stay tractable. WispTerm's files are smaller and harder.
+The historical Axis B audit found several modules with multiple
+responsibilities. The counts below describe that audit. The current source
+and [guards](#82-the-boundary-guards-srcsource_guards) govern new changes.
 
 | File | Lines | What is tangled |
 |------|------|-----------------|
@@ -376,9 +372,21 @@ that gets real runtime coverage on Linux.
 
 ## 7. Ghostty cross-reference
 
+Before planning or changing a desktop terminal feature, use `gh` to examine
+the relevant [Ghostty source](https://github.com/ghostty-org/ghostty) and record
+the behavior that guides the change. Follow compatible config keys and value
+formats, theme files, colors, and cursor semantics. Keep VT parsing and state in
+libghostty-vt. Pin dependency updates to an exact commit and matching hash in
+[`build.zig.zon`](../build.zig.zon). Check those source signatures when updating
+calls such as `Terminal.vt`, `Stream.nextSlice`, and `Terminal.scrollViewport`.
+
 | WispTerm (target) | Ghostty | Notes |
 |------------------|---------|-------|
-| `src/renderer/gpu/gpu.zig` | `src/renderer/generic.zig` | Renderer generic over a `GraphicsAPI`; documented abstraction hierarchy |
+| `src/config.zig`, `src/config_watcher.zig`, `src/themes.zig` | [Config](https://github.com/ghostty-org/ghostty/blob/main/src/config/Config.zig), [themes](https://github.com/ghostty-org/ghostty/blob/main/src/config/theme.zig) | Key-value syntax, config reload, and theme resolution |
+| `src/platform/pty_windows.zig` | [Windows OS integration](https://github.com/ghostty-org/ghostty/blob/main/src/os/windows.zig), [PTY](https://github.com/ghostty-org/ghostty/blob/main/src/pty.zig) | ConPTY launch, resize, and IO |
+| `src/input.zig`, `src/apprt/` | [Input](https://github.com/ghostty-org/ghostty/tree/main/src/input), [native hosts](https://github.com/ghostty-org/ghostty/tree/main/src/apprt) | Host events and terminal key and mouse encoding |
+| `src/font/sprite/`, `src/font/embedded.zig`, `src/platform/font_discovery_windows.zig` | [Glyph sprites](https://github.com/ghostty-org/ghostty/tree/main/src/font/sprite), [font discovery](https://github.com/ghostty-org/ghostty/blob/main/src/font/discovery.zig) | Box drawing, braille, JetBrains Mono fallback, and platform discovery. WispTerm uses DirectWrite on Windows. |
+| `src/renderer/gpu/gpu.zig` | [Generic renderer](https://github.com/ghostty-org/ghostty/blob/main/src/renderer/generic.zig) | Renderer generic over a `GraphicsAPI` |
 | `src/renderer/gpu/backend.zig` | `src/renderer/backend.zig` | `Backend{opengl,metal,webgl}`; `default(target)` → Metal on Darwin |
 | `src/renderer/gpu/opengl/*` | `src/renderer/opengl/*` | `Target/Frame/RenderPass/Pipeline/Buffer/Texture/Sampler/shaders` |
 | `src/renderer/gpu/metal/*` | `src/renderer/metal/*` | Phase D; mirrors opengl with MSL shaders |
@@ -388,17 +396,16 @@ that gets real runtime coverage on Linux.
 | `src/platform/window_backend_macos.zig` | Swift/AppKit + `src/apprt/embedded.zig` | AppKit host owns its own event loop |
 | `src/platform/font_backend_macos.zig` | `src/font/discovery.zig` | CoreText discovery + fallback |
 
-> `remote/` is out of scope for the Ghostty comparison and for these
-> platform-leakage checks (per `AGENTS.md`, `ROADMAP.md`, and `KNOWN_ISSUES.md`).
+Desktop feature work and platform-leakage checks use the references above.
+For `remote/` work use the [browser and relay guide](../remote/README.md).
 
 ---
 
 ## 8. Structural-debt governance (Axis B in practice)
 
 Axis B used to be a roadmap aspiration. It is now governed mechanically so the
-monolith UI files cannot quietly regrow while they are being decomposed. This
-section is the playbook the `AGENTS.md` "Cohesion and coupling" section points
-to.
+monolith UI files cannot quietly regrow while they are being decomposed. The
+[project entry point](../AGENTS.md) directs changes to watched files here.
 
 Directory moves are governed separately because they should only reflect
 boundaries that have already stabilized. See
@@ -432,34 +439,34 @@ Two numeric signals sit on top of that judgment, neither of which is the goal:
 - **> 5,000 lines** — a soft signal to review responsibility, dependency
   direction, import fan-in/out, state ownership, and test boundaries. Not
   enforced.
-- **≥ 10,000 lines** — a hard backstop (`file_size_guard`). A *runaway tripwire,
-  not a health certificate*: a file well under it can still be tangled, and one
-  approaching it has usually already lost cohesion. `check-sizes` prevents
-  uncontrolled growth; it does not certify architectural health.
+- **Hard file-size limit** — [`file_size_guard.zig`](../src/source_guards/file_size_guard.zig)
+  defines the ceiling and `zig build check-sizes` checks it. Review cohesion
+  and ownership independently of the size check.
 
 ### 8.2 The boundary guards (`src/source_guards/`)
 
-These are the primary enforcement mechanism. Each is a source-scan test (the
-`@embedFile`-and-count idiom of `input/dirty_guard.zig`) that **freezes a count
-at today's value; the count may only shrink**. Adding a new occurrence fails the
-gate — you must first remove one, or use the pattern the guard names.
+The linked guard sources define their current scopes, ceilings, and
+allowlists. When editing a watched integration or session file, move existing
+debt to the owning layer and lower the corresponding ceiling as cases are
+removed. Keep a zero ceiling at zero.
 
-| Guard | Freezes | Today's ceiling | Escape hatch |
-|---|---|---|---|
-| `file_size_guard` | lines in any `src/**/*.zig` (whole tree, future files too) | < 10,000 | split by responsibility; never raise the limit |
-| `global_state_guard` | top-level `g_*` / `threadlocal` in the watched integration/session files | AppWindow 66, input 48, overlays 32, assistant/conversation/session 15 | new state → an explicit state struct (`appwindow/state.zig`, …) |
-| `import_hub_guard` | `pub const X = @import(...)` re-exports in `AppWindow.zig` | 16 | import the real module directly, not via `AppWindow.X` |
-| `side_effect_guard` | direct `g_force_rebuild` / `g_cells_valid` writes in the watched integration/session files | AppWindow 44, input 81, overlays 0, assistant/conversation/session 0 | return a `UiEffect`; land it via `AppWindow.applyUiEffect` |
+| Guard source | Checks | Required pattern |
+|---|---|---|
+| [`file_size_guard`](../src/source_guards/file_size_guard.zig) | Zig files throughout `src/` | Split by responsibility. |
+| [`global_state_guard`](../src/source_guards/global_state_guard.zig) | Top-level `g_*` and `threadlocal` in watched files | Use an explicit state struct or feature-owned state. |
+| [`import_hub_guard`](../src/source_guards/import_hub_guard.zig) | `AppWindow.zig` import re-exports | Import the module that owns the definition. |
+| [`side_effect_guard`](../src/source_guards/side_effect_guard.zig) | Direct repaint flag writes in watched files | Return a `UiEffect` and route it through `AppWindow.applyUiEffect`. |
+| [`objc_autorelease_guard`](../src/source_guards/objc_autorelease_guard.zig) | Exported Objective-C bridge functions that send Objective-C messages | Wrap message sends in `@autoreleasepool`. The macOS host runs without an outer AppKit pool. |
+| [`tab_state_init_guard`](../src/source_guards/tab_state_init_guard.zig) | Heap-created `TabState` initialization | Initialize with one struct literal to apply field defaults. |
+| [`layered_dependency_guard`](../src/source_guards/layered_dependency_guard.zig) | `termio/` imports across the renderer boundary | Keep terminal IO independent of the renderer. |
 
 They run in `zig build test` and — since `test-full` is now a superset of `test`
 — in the pre-merge gate. The file-size backstop is also a standalone command,
 `zig build check-sizes`.
 
-**Next guard (documented, not yet mechanized): layered-dependency.** A scan that
-forbids reverse imports across the layer model in §8.5 — e.g. `renderer/overlays/*`
-importing `AppWindow.zig`, or `input/*` importing a concrete renderer. It needs
-per-edge allowlists seeded from current violations, so it lands once those edges
-have converged rather than freezing the violations in place.
+Other reverse imports in [the layer model](#85-the-layer-model) are candidates
+for separate guards. Add each check when its dependency edge has converged and
+keep any allowlist specific to that edge.
 
 ### 8.3 Remediation priority
 
@@ -569,7 +576,7 @@ The dependency direction these guards defend. Imports should flow downward only:
 - **`remote/*`** — an independent security boundary; does not reach into
   main-app state (also out of scope for the Ghostty/platform-leakage checks).
 
-The reverse edges worth locking first (the layered-dependency guard in §8.2):
+The remaining reverse edges worth locking (see the checks in §8.2):
 `renderer/overlays/*` must not import `AppWindow.zig` (only narrow types such as
 `appwindow/ui_effect.zig`); `input/*` must not import a concrete renderer module;
 `assistant/conversation/session.zig` must not hold a set of UI-trigger callbacks

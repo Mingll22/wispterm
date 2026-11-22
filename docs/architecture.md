@@ -20,7 +20,8 @@ an experimental Linux host.
    - `src/Surface.zig` — per-terminal surface state and PTY integration.
    - `src/termio/` — PTY read/write threads and the terminal IO mailbox.
    - `src/renderer/` — GPU-backend-agnostic cell rendering, overlays, titlebar.
-   - `libghostty-vt` (vendored) — the VT parser and terminal state machine.
+   - [Pinned `libghostty-vt`](../build.zig.zon) — the VT parser and terminal
+     state machine.
 
 2. **Host** — owns the OS window and event loop and pumps the core. There is one
    host per platform. The host is the *only* layer allowed to talk to a concrete
@@ -120,31 +121,10 @@ out of scope.
 
 ## Internal-architecture invariants
 
-Beyond the platform seam, a second set of invariants keeps the core itself
-maintainable. **Cohesion and coupling — not file length — are the criteria**: a
-file should own one coherent responsibility with explicit state ownership. Large
-files are acceptable when they stay cohesive (Ghostty ships 10k–15k-line core
-files that do); the smell is tangled responsibility, not size. These are
-enforced by source-scan ratchet tests in `src/source_guards/` that freeze
-today's structural debt so it can only **shrink**:
-
-- **`file_size_guard`** — no `src/**/*.zig` over 10,000 lines (a runaway
-  backstop; also `zig build check-sizes`).
-- **`global_state_guard`** — the top-level `g_*` / `threadlocal` count in
-  `AppWindow.zig` / `input.zig` / `renderer/overlays.zig` /
-  `assistant/conversation/session.zig` may only shrink; new state belongs in an
-  explicit state struct.
-- **`import_hub_guard`** — `AppWindow.zig`'s `pub const X = @import(...)`
-  re-export count may only shrink; import the real module directly, not via
-  `AppWindow.X`.
-- **`side_effect_guard`** — direct `g_force_rebuild` / `g_cells_valid` writes in
-  those files may only shrink; route UI invalidation through the `UiEffect`
-  boundary (`AppWindow.applyUiEffect`).
-
-Because `test-full` is a superset of `test`, these gate the pre-merge build. The
-cohesion criterion, the remediation roadmap, and the layer model live in
-[docs/decoupling-guide.md §8](decoupling-guide.md#8-structural-debt-governance-axis-b-in-practice);
-the contributor-facing summary is in [`AGENTS.md`](../AGENTS.md).
+Keep each module cohesive, with a clear owner, API, and dependency direction.
+Large modules can be appropriate for a single responsibility. Before changing
+an integration boundary, read the [structural-debt guide](decoupling-guide.md#8-structural-debt-governance-axis-b-in-practice)
+for the source checks and how to lower their ratchets.
 
 ## Integration layer vs feature domains
 
@@ -191,6 +171,45 @@ Guidance for new code (these keep the boundary from re-tangling):
   case to the right pattern is how the boundary actually converges. The layer
   model that names these reverse edges is
   [docs/decoupling-guide.md §8.5](decoupling-guide.md#85-the-layer-model).
+
+## Desktop UI patterns
+
+Choose one of the three desktop styles before adding a screen. Their shared
+geometry is in [`ui_patterns.zig`](../src/renderer/ui_patterns.zig) and is
+included in the fast tests.
+
+| Style | Use for | Required structure |
+|---|---|---|
+| Command palette | Transient find-and-run actions, such as Command Center and the Copilot History picker | Search field, filtered scrollable list, visible selection, shortcut or metadata column, and Escape to close. Use a form for configuration. |
+| Form dialog | Small settings, profile edits, confirmations, and launch choices | Centered constrained dialog with a title, one-line instruction, aligned fields, and explicit primary and cancel or close actions. Fit it inside the viewport gutters. |
+| Workbench page | Persistent tab-owned tools such as Settings, Memory Center, Skill Center, Port Forwarding, and Agent History | Header, content region, and a full-width footer or status band. Put shortcut hints and non-blocking status in the footer. Empty states give a reason and a next action. |
+
+Ghostty uses a searchable command palette for transient actions and a stable
+window container for tabs. WispTerm uses the same interaction boundaries in
+its GPU-rendered desktop UI. When changing a screen, preserve readable labels
+or deliberate truncation with a way to reveal the full label. Keep localization
+consistent, allow literal proper names and model IDs, and keep state with its
+owner.
+
+## Event-driven repaint
+
+[`frameNeedsRender`](../src/appwindow/render_gate.zig) controls when the main
+loop draws on Windows and macOS. `overlays.anyOverlayActive()` leaves static
+overlays such as the Command Center, session launcher, and Settings idle until
+an event requires a new frame. An overlay or panel key or character event that
+changes selection, text, or focus must request a repaint in that iteration.
+Otherwise the change waits for a later wake such as a mouse move or cursor blink.
+
+Return or route a [`UiEffect`](../src/appwindow/ui_effect.zig). Input helpers
+`requestInputRepaint()`, `requestInputRebuild()`, and `applyInputEffect()`
+funnel effects through `AppWindow.applyUiEffect`. Worker threads can request a
+backend wake with `UiEffect{ .wake_backend = true }`. Keep direct writes to
+`g_force_rebuild` and `g_cells_valid` within the effect sink and the legacy
+cases tracked by the [`side_effect_guard`](../src/source_guards/side_effect_guard.zig). The
+[`dirty_guard`](../src/input/dirty_guard.zig) checks converted input handlers.
+Use the [full UI test entry points](development.md#tests-and-structural-guards)
+and the [frame probe](development.md#frame-latency-diagnostics) when verifying
+input and repaint behavior.
 
 ## Implementing a new host
 
