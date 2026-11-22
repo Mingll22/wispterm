@@ -1,3 +1,4 @@
+import type { Terminal } from "@xterm/xterm";
 import type { MobileInputMode } from "./types";
 
 const GUARD_ATTR = "data-wispterm-native-input-guard";
@@ -9,6 +10,21 @@ const PREV_TABINDEX_ATTR = "data-wispterm-prev-tabindex";
 type NativeInputRoot = {
   querySelectorAll<E extends Element = Element>(selectors: string): ArrayLike<E>;
 };
+
+export function suppressMirroredTerminalReplies(term: Terminal): void {
+  // The desktop VT already answers queries from its PTY. xterm's onData
+  // combines replies and input; its core carries the user-input flag.
+  const { coreService } = (term as unknown as {
+    _core: {
+      coreService: { triggerDataEvent(data: string, wasUserInput?: boolean): void };
+    };
+  })._core;
+  const emit = coreService.triggerDataEvent.bind(coreService);
+  coreService.triggerDataEvent = (data, wasUserInput) => {
+    // Browser focus reports are part of the user's terminal interaction.
+    if (wasUserInput || data === "\x1b[I" || data === "\x1b[O") emit(data, wasUserInput);
+  };
+}
 
 export function shouldBlockNativeTerminalInput(mobile: boolean, mode: MobileInputMode): boolean {
   return mobile && mode === "view";

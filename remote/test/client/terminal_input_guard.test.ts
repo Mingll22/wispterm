@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import xterm from "@xterm/xterm";
 
 import {
   setNativeTerminalInputBlocked,
   shouldBlockNativeTerminalInput,
+  suppressMirroredTerminalReplies,
 } from "../../src/client/terminal_input_guard";
 
 class FakeInput {
@@ -46,6 +48,26 @@ test("native terminal input is blocked only for mobile view mode", () => {
   assert.equal(shouldBlockNativeTerminalInput(true, "view"), true);
   assert.equal(shouldBlockNativeTerminalInput(true, "edit"), false);
   assert.equal(shouldBlockNativeTerminalInput(false, "view"), false);
+});
+
+test("xterm replay leaves terminal replies to the host and forwards browser interaction", async () => {
+  const term = new xterm.Terminal();
+  suppressMirroredTerminalReplies(term);
+  const sent: string[] = [];
+  term.onData((data) => sent.push(data));
+  try {
+    await new Promise<void>((done) => term.write("\x1b[c\x1b[>c\x1b[6n\x1b[?2004$p", done));
+    assert.deepEqual(sent, []);
+
+    term.input("\x1b]11;rgb:1212/1212/1212\x1b\\", false);
+    term.input("你好");
+    term.input("\x1b[<0;2;3M", true);
+    term.input("\x1b[I", false);
+    term.input("\x1b[O", false);
+    assert.deepEqual(sent, ["你好", "\x1b[<0;2;3M", "\x1b[I", "\x1b[O"]);
+  } finally {
+    term.dispose();
+  }
 });
 
 test("blocking native terminal input disables and blurs xterm textareas", () => {
