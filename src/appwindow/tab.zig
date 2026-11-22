@@ -13,6 +13,8 @@ const markdown_preview = @import("../preview/markdown.zig");
 const input_key = @import("../input/key.zig");
 const remote_hub = @import("../remote_hub.zig");
 const remote_workspace = @import("../remote_workspace.zig");
+const remote_control = @import("../remote_terminal_control.zig");
+const remote_tab = @import("remote_tab_control.zig");
 const session_persist = @import("../session_persist.zig");
 const recipe_store = @import("../recipe/store.zig");
 const ai_chat = @import("../assistant/conversation/session.zig");
@@ -76,6 +78,7 @@ pub const TabState = struct {
     tree: SplitTree,
     focused: SplitTree.Node.Handle = .root,
     workspace_id: ?remote_workspace.Id = null,
+    remote_tab_control: remote_tab.State = .{},
     ai_chat_session: ?*ai_chat.Session = null,
     ai_history_session: ?*ai_history_session.Session = null,
     memory_center_session: ?*memory_center_session.Session = null,
@@ -207,9 +210,32 @@ pub const TabState = struct {
         return .{ .app = app, .state = agg, .confidence = 100 };
     }
 
+    pub fn supportsRemoteWorkspace(self: *const TabState) bool {
+        if (self.kind != .terminal or self.tmux_window_id != null or self.tmux_owner != null) return false;
+        if (self.tree.isEmpty() or self.tree.nodes.len > remote_workspace.max_tree_nodes) return false;
+        var panes = self.tree.panes();
+        while (panes.next()) |entry| switch (entry.pane) {
+            .terminal => |surface| if (!surface.supportsTabControl()) return false,
+            .preview => return false,
+        };
+        return true;
+    }
+
+    pub fn publishRemoteWorkspace(self: *TabState) ?remote_workspace.Id {
+        if (!self.supportsRemoteWorkspace()) return null;
+        if (self.workspace_id == null) self.workspace_id = remote_workspace.formatId(std.crypto.random.int(u64));
+        self.remote_tab_control.setEnabled(&self.tree, true);
+        return self.workspace_id;
+    }
+
+    pub fn reclaimRemoteTabControl(self: *TabState, reason: remote_control.Reason, policy: Surface.ResizePolicy) bool {
+        return self.remote_tab_control.reclaim(&self.tree, g_remote_hub, self.workspace_id, reason, policy);
+    }
+
     pub fn deinit(self: *TabState, allocator: std.mem.Allocator) void {
         switch (self.kind) {
             .terminal => {
+                _ = self.reclaimRemoteTabControl(.released, .immediate);
                 self.tree.deinit();
                 if (self.copilot_session) |session| {
                     session.deinit();
@@ -1105,6 +1131,8 @@ pub fn splitIntoPreview(gpa: std.mem.Allocator) ?*PreviewPane {
     };
 
     // Swap the tree exactly as splitFocusedSurfaceWithCommand does
+    _ = t.reclaimRemoteTabControl(.desktop, .coalesced);
+    t.remote_tab_control.setEnabled(&t.tree, false);
     var old_tree = t.tree;
     t.tree = new_tree;
     old_tree.deinit();
@@ -1168,6 +1196,8 @@ pub fn splitIntoPreviewStacked(gpa: std.mem.Allocator) ?*PreviewPane {
         return null;
     };
 
+    _ = t.reclaimRemoteTabControl(.desktop, .coalesced);
+    t.remote_tab_control.setEnabled(&t.tree, false);
     var old_tree = t.tree;
     t.tree = new_tree;
     old_tree.deinit();
@@ -1295,6 +1325,7 @@ pub fn splitFocusedReturningSurface(
         cwd,
         shell_cmd,
         true,
+        .desktop,
     );
 }
 
@@ -1328,6 +1359,7 @@ pub fn splitFocusedWithCommandReturningSurface(
         cwd,
         shell_cmd,
         false,
+        .desktop,
     );
 }
 
@@ -1343,7 +1375,7 @@ pub fn splitWithDefaultShell(
     cursor_style: CursorStyle,
     cursor_blink: bool,
 ) ?*Surface {
-    return splitSurfaceWithCommand(allocator, t, target.handle, target.surface, direction, cell_w, cell_h, cursor_style, cursor_blink, null, getShellCmd(), false);
+    return splitSurfaceWithCommand(allocator, t, target.handle, target.surface, direction, cell_w, cell_h, cursor_style, cursor_blink, null, getShellCmd(), false, .remote);
 }
 
 fn splitSurfaceWithCommand(
@@ -1359,6 +1391,7 @@ fn splitSurfaceWithCommand(
     cwd: platform_pty_command.Cwd,
     shell_cmd: platform_pty_command.CommandLine,
     inherit_ssh_connection: bool,
+    origin: enum { desktop, remote },
 ) ?*Surface {
     // Calculate exact dimensions for the new split surface
     const screen_w = target_surface.size.screen.width;
@@ -1401,8 +1434,6 @@ fn splitSurfaceWithCommand(
         std.debug.print("Failed to create Surface for split\n", .{});
         return null;
     };
-    new_surface.attachRemoteHub(g_remote_hub);
-
     if (inherit_ssh_connection) {
         if (target_surface.ssh_connection) |conn| {
             new_surface.setSshConnectionValue(conn);
@@ -1437,6 +1468,13 @@ fn splitSurfaceWithCommand(
 
     const new_handle: SplitTree.Node.Handle = @enumFromInt(t.tree.nodes.len);
 
+    if (origin == .desktop) _ = t.reclaimRemoteTabControl(.desktop, .coalesced);
+    if (new_tree.nodes.len > remote_workspace.max_tree_nodes or !new_surface.supportsTabControl()) {
+        _ = t.reclaimRemoteTabControl(.released, .immediate);
+        t.remote_tab_control.setEnabled(&t.tree, false);
+    }
+    t.remote_tab_control.attach(new_surface);
+    new_surface.attachRemoteHub(g_remote_hub);
     var old_tree = t.tree;
     t.tree = new_tree;
     old_tree.deinit();
@@ -1471,6 +1509,7 @@ pub fn closeFocusedSplit(allocator: std.mem.Allocator) CloseResult {
 
     if (!t.tree.isSplit() or t.focused.idx() >= t.tree.nodes.len or t.tree.nodes[t.focused.idx()] != .leaf) {
         if (g_tab_count <= 1) {
+            _ = t.reclaimRemoteTabControl(.released, .immediate);
             return .close_window;
         } else {
             closeTab(active_tab_state.g_active_tab, allocator);
@@ -1478,7 +1517,7 @@ pub fn closeFocusedSplit(allocator: std.mem.Allocator) CloseResult {
         }
     }
 
-    removeSplitPane(allocator, t, t.focused) catch {
+    removeSplitPane(allocator, t, t.focused, .desktop) catch {
         std.debug.print("Failed to remove split from tree\n", .{});
         return .no_op;
     };
@@ -1487,7 +1526,7 @@ pub fn closeFocusedSplit(allocator: std.mem.Allocator) CloseResult {
 
 /// Remove one leaf from a split tab. An unaffected focused pane keeps its
 /// identity even when the tree compacts its handles.
-pub fn removeSplitPane(allocator: std.mem.Allocator, t: *TabState, target: SplitTree.Node.Handle) !void {
+pub fn removeSplitPane(allocator: std.mem.Allocator, t: *TabState, target: SplitTree.Node.Handle, origin: enum { desktop, remote }) !void {
     std.debug.assert(t.tree.isSplit() and t.tree.nodes[target.idx()] == .leaf);
     const old_focus = if (t.focused != target) t.focused else (try t.tree.goto(allocator, target, .next_wrapped)) orelse .root;
     const next_pane: ?SplitTree.Pane = if (old_focus != target and old_focus.idx() < t.tree.nodes.len) switch (t.tree.nodes[old_focus.idx()]) {
@@ -1497,6 +1536,8 @@ pub fn removeSplitPane(allocator: std.mem.Allocator, t: *TabState, target: Split
 
     const new_tree = try t.tree.remove(allocator, target);
 
+    if (origin == .desktop) _ = t.reclaimRemoteTabControl(.desktop, .coalesced);
+    if (t.tree.nodes[target.idx()].leaf.surface()) |surface| t.remote_tab_control.detach(surface);
     var old_tree = t.tree;
     t.tree = new_tree;
     old_tree.deinit();
@@ -1575,6 +1616,7 @@ pub fn equalizeSplits(allocator: std.mem.Allocator) bool {
     }
 
     const new_tree = t.tree.equalize(allocator) catch return false;
+    if (t.tree.isSplit()) _ = t.reclaimRemoteTabControl(.desktop, .coalesced);
     t.tree.deinit();
     t.tree = new_tree;
 
@@ -1589,6 +1631,7 @@ pub fn transposeFocusedSplit(allocator: std.mem.Allocator) bool {
     if (t.kind != .terminal) return false;
 
     const new_tree = (t.tree.transposeParent(allocator, t.focused) catch return false) orelse return false;
+    _ = t.reclaimRemoteTabControl(.desktop, .coalesced);
 
     var it = t.tree.surfaces();
     while (it.next()) |entry| {
@@ -1617,6 +1660,7 @@ pub fn swapPanels(a: SplitTree.Node.Handle, b: SplitTree.Node.Handle) bool {
     if (a.idx() >= t.tree.nodes.len or b.idx() >= t.tree.nodes.len) return false;
     if (t.tree.nodes[a.idx()] != .leaf or t.tree.nodes[b.idx()] != .leaf) return false;
 
+    _ = t.reclaimRemoteTabControl(.desktop, .coalesced);
     t.tree.swapLeaves(a, b);
     // The dragged surface (was at `a`) now lives at `b`; keep it focused.
     t.focused = b;

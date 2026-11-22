@@ -4,6 +4,8 @@ const std = @import("std");
 const config = @import("../config.zig");
 const remote_workspace = @import("../remote_workspace.zig");
 const Surface = @import("../Surface.zig");
+const remote_control = @import("../remote_terminal_control.zig");
+const remote_hub = @import("../remote_hub.zig");
 const SplitTree = @import("../split_tree.zig");
 const tab = @import("tab.zig");
 
@@ -15,6 +17,7 @@ const max_web_panes = 4;
 pub const Host = struct {
     allocator: std.mem.Allocator,
     grid: GridSize,
+    can_mutate: bool = true,
     cell_width: f32,
     cell_height: f32,
     cursor_style: config.CursorStyle,
@@ -24,21 +27,6 @@ pub const Host = struct {
     tabSpawned: *const fn () void,
     layoutChanged: *const fn (*tab.TabState, ?remote_workspace.Id) void,
 };
-
-fn eligible(state: *const tab.TabState) bool {
-    if (state.kind != .terminal or state.tmux_window_id != null or state.tmux_owner != null) return false;
-    if (state.tree.isEmpty() or state.tree.nodes.len > remote_workspace.max_tree_nodes) return false;
-    var panes = state.tree.panes();
-    while (panes.next()) |entry| {
-        if (entry.pane != .terminal) return false;
-    }
-    return true;
-}
-
-fn tabId(state: *tab.TabState) remote_workspace.Id {
-    if (state.workspace_id == null) state.workspace_id = remote_workspace.formatId(std.crypto.random.int(u64));
-    return state.workspace_id.?;
-}
 
 fn revision(tree: *const SplitTree) remote_workspace.Id {
     var hash = std.hash.Wyhash.init(0);
@@ -67,8 +55,7 @@ fn hashNode(tree: *const SplitTree, handle: Handle, hash: *std.hash.Wyhash) void
 }
 
 pub fn appendLayoutFields(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), state: *tab.TabState) !void {
-    if (!eligible(state)) return;
-    const id = tabId(state);
+    const id = state.publishRemoteWorkspace() orelse return;
     const layout_revision = revision(&state.tree);
     try out.print(allocator, ",\"tabId\":\"{s}\",\"layoutRevision\":\"{s}\",\"splitTree\":[", .{ &id, &layout_revision });
     try appendNode(allocator, out, &state.tree, .root);
@@ -90,25 +77,34 @@ fn appendNode(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), tr
 
 pub fn apply(host: Host, request: remote_workspace.Request) remote_workspace.Result {
     if (request.action == .@"create-tab") {
+        if (!host.can_mutate) return .{ .status = .stale };
         if (tab.g_tab_count >= tab.MAX_TABS) return .{ .status = .limit };
         if (!tab.spawnTabWithCwd(host.allocator, host.grid.cols, host.grid.rows, host.cursor_style, host.cursor_blink, null)) return .{ .status = .failed };
         const state = tab.activeTab().?;
         const surface = state.focusedSurface().?;
         host.tabSpawned();
-        return .{ .status = .ok, .tab_id = tabId(state), .surface_id = surface.remote_id };
+        return .{ .status = .ok, .tab_id = state.publishRemoteWorkspace(), .surface_id = surface.remote_id };
     }
 
     const id = request.tabId orelse return .{ .status = .failed };
+    const target = findTab(id) orelse return .{ .status = .stale };
+    return applyToTab(host, request, target.index, target.state);
+}
+
+pub fn findTab(id: remote_workspace.Id) ?struct { index: usize, state: *tab.TabState } {
     for (tab.g_tabs[0..tab.g_tab_count], 0..) |candidate, index| {
         const state = candidate orelse continue;
         const current_id = state.workspace_id orelse continue;
-        if (std.mem.eql(u8, &current_id, &id)) return applyToTab(host, request, index, state);
+        if (std.mem.eql(u8, &current_id, &id)) return .{ .index = index, .state = state };
     }
-    return .{ .status = .stale };
+    return null;
 }
 
 fn applyToTab(host: Host, request: remote_workspace.Request, index: usize, state: *tab.TabState) remote_workspace.Result {
-    if (!eligible(state)) return .{ .status = .unsupported };
+    if (!state.supportsRemoteWorkspace()) return .{ .status = .unsupported };
+    const identity: remote_control.Identity = .{ .client_id = request.clientId, .lease_id = request.leaseId };
+    if (!state.remote_tab_control.lease.authorizes(identity)) return .{ .status = .denied };
+    if (!host.can_mutate) return .{ .status = .stale };
     const requested_revision = request.layoutRevision orelse return .{ .status = .failed };
     const current_revision = revision(&state.tree);
     if (!std.mem.eql(u8, &current_revision, &requested_revision)) return .{ .status = .stale };
@@ -135,7 +131,7 @@ fn applyToTab(host: Host, request: remote_workspace.Request, index: usize, state
             if (!state.tree.isSplit()) {
                 host.closeTab(index);
             } else {
-                tab.removeSplitPane(host.allocator, state, target.handle) catch return .{ .status = .failed };
+                tab.removeSplitPane(host.allocator, state, target.handle, .remote) catch return .{ .status = .failed };
                 host.layoutChanged(state, id);
             }
         },
@@ -234,9 +230,13 @@ test "workspace applies only a current revision and an exact surface permutation
     var a: Surface = undefined;
     a.remote_id = "0000000000000001".*;
     a.ref_count = 1;
+    a.remote_terminal = .{ .enabled = true };
+    a.confirmed_grid = .init(80 << 16 | 24);
     var b: Surface = undefined;
     b.remote_id = "0000000000000002".*;
     b.ref_count = 1;
+    b.remote_terminal = .{ .enabled = true };
+    b.confirmed_grid = .init(80 << 16 | 24);
     const nodes = [_]SplitTree.Node{
         .{ .split = .{ .layout = .horizontal, .ratio = 0.5, .left = @enumFromInt(1), .right = @enumFromInt(2) } },
         .{ .leaf = .{ .terminal = &a } },
@@ -276,7 +276,16 @@ test "workspace applies only a current revision and an exact surface permutation
         .layoutChanged = Hooks.changed,
     };
     const initial_revision = revision(&state.tree);
-    const id = tabId(&state);
+    const id = state.publishRemoteWorkspace().?;
+    var hub = remote_hub.Hub.init(allocator);
+    defer hub.deinit();
+    state.remote_tab_control.request(&state.tree, &hub, .{
+        .type = "tab-control",
+        .tabId = id,
+        .clientId = "client",
+        .action = .acquire,
+    });
+    const lease_id = state.remote_tab_control.lease.grant.?.id;
     var layout = [_]remote_workspace.Node{
         .{ .axis = .y, .ratio = 0.625 },
         .{ .surfaceId = b.remote_id },
@@ -291,6 +300,13 @@ test "workspace applies only a current revision and an exact surface permutation
         .layoutRevision = initial_revision,
         .splitTree = &layout,
     };
+    try std.testing.expectEqual(remote_workspace.Status.denied, apply(host, request).status);
+    request.leaseId = lease_id + 1;
+    try std.testing.expectEqual(remote_workspace.Status.denied, apply(host, request).status);
+    request.leaseId = lease_id;
+    request.clientId = "other";
+    try std.testing.expectEqual(remote_workspace.Status.denied, apply(host, request).status);
+    request.clientId = "client";
     try std.testing.expectEqual(remote_workspace.Status.failed, apply(host, request).status);
     try std.testing.expectEqual(initial_revision, revision(&state.tree));
     layout[2].surfaceId = "0000000000000003".*;
@@ -304,7 +320,7 @@ test "workspace applies only a current revision and an exact surface permutation
     try std.testing.expectEqual(&a, state.tree.nodes[2].leaf.terminal);
     try std.testing.expectEqual(&a, state.focusedSurface().?);
     try std.testing.expectEqual(state.focused, state.tree.zoomed.?);
-    try std.testing.expectEqual(id, tabId(&state));
+    try std.testing.expectEqual(id, state.publishRemoteWorkspace().?);
     try std.testing.expectEqual(@as(usize, 2), a.ref_count);
     try std.testing.expectEqual(@as(usize, 2), b.ref_count);
     try std.testing.expectEqual(remote_workspace.Status.stale, apply(host, request).status);

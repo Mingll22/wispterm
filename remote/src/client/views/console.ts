@@ -1,8 +1,8 @@
 import { getLocale, isRemoteLocale, setLocale, tr } from "../i18n";
 import type { ConnectionStatus, LayoutSurface, MobileInputMode, MobileVisualZoom } from "../types";
-import { iconAdd, iconClose, iconDelete, iconMenu, themeToggleMarkup } from "../icons";
+import { iconAdd, iconClose, iconMenu, themeToggleMarkup } from "../icons";
 import { bindThemeToggleButtons } from "../theme";
-import { activeSurfaceIdForInput, currentTab, state } from "../state";
+import { activeSurfaceIdForInput, currentTab, state, tabControlId } from "../state";
 import {
   clearSessionKey,
   maskSessionKey,
@@ -49,7 +49,7 @@ import {
   type WeixinSettingsResponse,
 } from "../weixin";
 import { connectionHeaderLabel, connectionStatusOffline } from "../connection_status";
-import { bindWorkspaceControls } from "../workspace_controls";
+import { bindWorkspaceControls, workspaceTabActionsMarkup } from "../workspace_controls";
 
 let viewportRefitBound = false;
 let mobileSurfaceSelectorObserver: ResizeObserver | null = null;
@@ -99,8 +99,8 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
 
         <div class="sidebar-main">
           <div class="sidebar-page${sidebarPage === "tabs" ? " active" : ""}" data-sidebar-page="tabs">
-            <button type="button" class="tab-chip workspace-new-tab" id="new-remote-tab" hidden>${iconAdd()}${tr("New tab", "新建标签")}</button>
             <div id="remote-tabs" class="remote-tabs empty">${tr("Connect WispTerm to see its tabs", "连接桌面端后显示标签页")}</div>
+            <button type="button" class="tab-chip workspace-new-tab" id="new-remote-tab" hidden>${iconAdd()}${tr("New tab", "新建标签")}</button>
           </div>
 
           <div class="sidebar-page${sidebarPage === "dashboard" ? " active" : ""}" data-sidebar-page="dashboard">
@@ -217,6 +217,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
         <span class="status-pip collapsed-status glass-surface" id="workspace-status" data-state="offline">
           <span class="collapsed-status-label">${tr("Offline", "未连接")}</span>
         </span>
+        ${workspaceTabActionsMarkup(" chrome-tab-actions collapsed-tab-actions")}
         ${themeToggleMarkup("collapsed-theme glass-surface")}
       </div>
       <section class="workspace">
@@ -233,10 +234,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
             </div>
           </div>
           <div class="mobile-chrome-controls">
-            <div class="workspace-tab-actions" id="mobile-workspace-actions" role="group" aria-label="${tr("Selected tab actions", "当前标签操作")}" hidden>
-              <button type="button" class="icon-button tab-add-pane" id="mobile-add-pane">${iconAdd()}</button>
-              <button type="button" class="icon-button tab-delete" id="mobile-delete-tab">${iconDelete()}</button>
-            </div>
+            ${workspaceTabActionsMarkup(" chrome-tab-actions mobile-tab-actions")}
             <div class="mobile-connection">
               ${themeToggleMarkup("mobile-theme-toggle")}
               <button type="button" class="status-pip" id="mobile-status-pip" data-state="offline" aria-label="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}" title="${tr("Not connected. Latency unavailable", "未连接，暂无延迟数据")}">${tr("Offline", "未连接")}</button>
@@ -296,6 +294,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
     selectPane,
     created: applyRemoteTabSelectionSidebarAction,
     previewEnded: refitAllSurfaces,
+    controlChanged: updateInputUi,
   });
 
   document.querySelector<HTMLButtonElement>("#logout-button")?.addEventListener("click", async () => {
@@ -571,9 +570,10 @@ export function updateInputUi(): void {
   const selectedSurfaceId = state.selectedSurfaceId ?? tab?.surfaces[0]?.id ?? null;
   const selectedSurface = tab?.surfaces.find((surface) => surface.id === selectedSurfaceId);
   const writable = connected && (Boolean(activeSurfaceIdForInput()) || selectedSurface?.kind === "ai_chat");
+  const leaseManaged = tabControlId(tab) !== undefined || selectedSurface?.terminalControl === true;
   const label = document.querySelector<HTMLSpanElement>("#control-state");
-  if (label) label.hidden = !connected || !selectedSurface || writable || selectedSurface.terminalControl === true;
-  if (selectedSurface?.terminalControl && !writable) {
+  if (label) label.hidden = !connected || !selectedSurface || writable || leaseManaged;
+  if (leaseManaged && !writable) {
     blurMobileTextInput();
     if (state.kbdVisible) setKbdVisible(false);
   }

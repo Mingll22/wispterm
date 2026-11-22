@@ -984,8 +984,10 @@
   pointer-events: none;
 }
 
-.remote-panel.selected:not(:only-child)::before {
-  border-color: var(--selected-ring);
+.panels-stage[data-mirrored] .remote-panel.selected::before {
+  z-index: 2;
+  border-color: color-mix(in srgb, var(--accent) 72%, transparent);
+  box-shadow: 0 0 0 1px var(--accent-soft), 0 0 12px var(--selected-ring);
 }
 
 .terminal-mount {

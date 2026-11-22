@@ -10,19 +10,14 @@ pub const default_max_history_rows: usize = 10_000;
 /// or truncated away. WeChat's remote path keeps the larger default.
 pub const agent_max_history_rows: usize = 400;
 
-const RowSpace = enum {
-    active,
-    screen,
+const SnapshotFormat = enum {
+    plain,
+    vt,
 };
 
-/// Web-console variant of `allocTerminalSnapshot`: wraps the plain-text dump
-/// with the escape sequences that mirror the host VT's input-affecting mode
-/// state (alternate screen, mouse tracking, bracketed paste, ...). Without
-/// them a remote xterm never learns that a full-screen TUI (issue #502:
-/// Claude Code) enabled mouse tracking before the client connected, so its
-/// wheel scrolls an empty local scrollback instead of reaching the app the
-/// way the desktop does. Plain-text consumers (agent tools, ctl, Jupyter
-/// detection) must keep using `allocTerminalSnapshot`.
+/// Web-console replay of the host VT screen, including cell styles and
+/// input-affecting modes. Live output continues from this state after attach.
+/// Text consumers use `allocTerminalSnapshot`.
 pub fn allocTerminalSnapshotWithModes(
     allocator: std.mem.Allocator,
     terminal: *const ghostty_vt.Terminal,
@@ -35,9 +30,7 @@ pub fn allocTerminalSnapshotWithModes(
     if (terminal.screens.active_key == .alternate)
         try out.appendSlice(allocator, "\x1b[?1049h");
 
-    const text = try allocTerminalSnapshot(allocator, terminal, max_history_rows);
-    defer allocator.free(text);
-    try out.appendSlice(allocator, text);
+    try appendTerminalRows(allocator, &out, terminal, max_history_rows, .vt);
 
     try appendInputModes(allocator, &out, terminal);
     return out.toOwnedSlice(allocator);
@@ -81,87 +74,112 @@ pub fn allocTerminalSnapshot(
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
 
-    const screen = terminal.screens.active;
-    const rows: usize = @intCast(screen.pages.rows);
-    const cols: usize = @intCast(screen.pages.cols);
-    const total_rows = @max(rows, screen.pages.total_rows);
-    const history_total = total_rows - rows;
-    const history_rows = @min(history_total, max_history_rows);
-    const history_start = history_total - history_rows;
-
-    var wrote_row = false;
-    // True once the previously-emitted row was soft-wrapped into the next one;
-    // suppresses the \r\n separator so wrapped logical lines stay contiguous.
-    var prev_wrapped = false;
-    for (history_start..history_total) |row| {
-        try appendSnapshotRow(allocator, &out, screen, .screen, row, cols, &wrote_row, &prev_wrapped);
-    }
-    for (0..rows) |row| {
-        try appendSnapshotRow(allocator, &out, screen, .active, row, cols, &wrote_row, &prev_wrapped);
-    }
-
+    try appendTerminalRows(allocator, &out, terminal, max_history_rows, .plain);
     return out.toOwnedSlice(allocator);
 }
 
-fn appendSnapshotRow(
+fn appendTerminalRows(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
-    screen: *const ghostty_vt.Screen,
-    row_space: RowSpace,
-    row: usize,
-    cols: usize,
-    wrote_row: *bool,
-    prev_wrapped: *bool,
+    terminal: *const ghostty_vt.Terminal,
+    max_history_rows: usize,
+    comptime format: SnapshotFormat,
 ) !void {
-    // A soft-wrapped row continues the previous logical line, so don't separate
-    // them with \r\n — otherwise long URLs split across rows become undetectable.
-    if (wrote_row.* and !prev_wrapped.*) try out.appendSlice(allocator, "\r\n");
-    wrote_row.* = true;
+    const screen = terminal.screens.active;
+    const pages = &screen.pages;
+    const history_total = pages.total_rows -| pages.rows;
+    const history_start = history_total -| max_history_rows;
+    var rows = pages.rowIterator(
+        .right_down,
+        .{ .screen = .{ .x = 0, .y = @intCast(history_start) } },
+        null,
+    );
 
-    // The row's soft-wrap flag lives on its Row metadata; read it from any cell.
-    const row_wrapped = if (screen.pages.getCell(snapshotPoint(row_space, 0, row))) |c| c.row.wrap else false;
-    prev_wrapped.* = row_wrapped;
+    var wrote_row = false;
+    var prev_wrapped = false;
+    var style: ghostty_vt.Style = .{};
+    while (rows.next()) |pin| {
+        // Replay soft wraps as one logical line.
+        if (wrote_row and !prev_wrapped) {
+            // Scrolling with a non-default background can fill the new row
+            // with that background before any cells are written.
+            if (format == .vt) try appendStyleChange(allocator, out, &style, .{});
+            try out.appendSlice(allocator, "\r\n");
+        }
+        wrote_row = true;
 
-    var last_col: ?usize = null;
-    for (0..cols) |col| {
-        const cell_data = screen.pages.getCell(snapshotPoint(row_space, col, row)) orelse continue;
-        const cp = cell_data.cell.codepoint();
-        if (cp != 0 and cp != ' ') last_col = col;
+        const page = &pin.node.data;
+        const row = pin.rowAndCell().row;
+        const page_cells = page.getCells(row);
+        const cells = page_cells[0..@min(page_cells.len, pages.cols)];
+        // A colored cell that triggers an automatic wrap can scroll and fill
+        // the new row with its background. Replay the tail to restore defaults.
+        const wrap_can_fill = format == .vt and prev_wrapped and
+            snapshotCellStyle(page, &cells[0]).bg_color != .none;
+        var end_col = cells.len;
+        if (!row.wrap and !wrap_can_fill) {
+            while (end_col > 0) : (end_col -= 1) {
+                const cell = &cells[end_col - 1];
+                const cp = cell.codepoint();
+                if (cp != 0 and cp != ' ') break;
+                if (format == .vt and (cell.hasStyling() or
+                    cell.content_tag == .bg_color_palette or cell.content_tag == .bg_color_rgb)) break;
+            }
+        }
+        // Emit one cell on an otherwise empty continuation to trigger the wrap.
+        if (format == .vt and prev_wrapped and end_col == 0) end_col = 1;
+        prev_wrapped = row.wrap;
+
+        for (cells[0..end_col]) |*cell| {
+            switch (cell.wide) {
+                .spacer_head, .spacer_tail => continue,
+                .narrow, .wide => {},
+            }
+            if (format == .vt) {
+                try appendStyleChange(allocator, out, &style, snapshotCellStyle(page, cell));
+            }
+            try appendCellText(allocator, out, page, cell, format);
+        }
     }
 
-    // Soft-wrapped rows are full by construction; emit the whole width so the
-    // continuation joins seamlessly. Non-wrapped rows trim trailing blanks.
-    const end_col = if (row_wrapped) cols else (last_col orelse return) + 1;
-    for (0..end_col) |col| {
-        const cell_data = screen.pages.getCell(snapshotPoint(row_space, col, row)) orelse {
-            try out.append(allocator, ' ');
-            continue;
-        };
-        try appendCellText(allocator, out, cell_data);
-    }
+    // Restore SGR state for live writes that begin without a style sequence.
+    if (format == .vt) try appendStyleChange(allocator, out, &style, screen.cursor.style);
 }
 
-fn snapshotPoint(row_space: RowSpace, col: usize, row: usize) ghostty_vt.Point {
-    const coord: ghostty_vt.Coordinate = .{
-        .x = @intCast(col),
-        .y = @intCast(row),
-    };
-    return switch (row_space) {
-        .active => .{ .active = coord },
-        .screen => .{ .screen = coord },
-    };
+fn snapshotCellStyle(page: *const ghostty_vt.Page, cell: *const ghostty_vt.Cell) ghostty_vt.Style {
+    var style: ghostty_vt.Style = if (cell.hasStyling()) page.styles.get(page.memory, cell.style_id).* else .{};
+    // Ghostty stores background-only cells separately from SGR-styled text.
+    switch (cell.content_tag) {
+        .bg_color_palette => style.bg_color = .{ .palette = cell.content.color_palette },
+        .bg_color_rgb => {
+            const rgb = cell.content.color_rgb;
+            style.bg_color = .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } };
+        },
+        else => {},
+    }
+    return style;
+}
+
+fn appendStyleChange(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    style: *ghostty_vt.Style,
+    next: ghostty_vt.Style,
+) !void {
+    if (style.eql(next)) return;
+    try out.print(allocator, "{f}", .{next.formatterVt()});
+    style.* = next;
 }
 
 fn appendCellText(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
-    cell_data: ghostty_vt.PageList.Cell,
+    page: *const ghostty_vt.Page,
+    cell: *const ghostty_vt.Cell,
+    comptime format: SnapshotFormat,
 ) !void {
-    const wide_val: u2 = @intFromEnum(cell_data.cell.wide);
-    if (wide_val == 2 or wide_val == 3) return;
-
-    const cp = cell_data.cell.codepoint();
-    if (cp == 0 or cp == ' ') {
+    const cp = cell.codepoint();
+    if (cp == 0 or (format == .plain and cp == ' ')) {
         try out.append(allocator, ' ');
         return;
     }
@@ -173,9 +191,8 @@ fn appendCellText(
     };
     try out.appendSlice(allocator, buf[0..len]);
 
-    if (!cell_data.cell.hasGrapheme()) return;
-    const page = &cell_data.node.data;
-    if (page.lookupGrapheme(cell_data.cell)) |extra_cps| {
+    if (!cell.hasGrapheme()) return;
+    if (page.lookupGrapheme(cell)) |extra_cps| {
         for (extra_cps) |ecp| {
             const extra_len = std.unicode.utf8Encode(@intCast(ecp), &buf) catch continue;
             try out.appendSlice(allocator, buf[0..extra_len]);
@@ -275,6 +292,115 @@ test "web snapshot of a plain shell stays escape-free and keeps scrollback" {
     try std.testing.expect(std.mem.indexOfScalar(u8, snapshot, 0x1b) == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "line1") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "line5") != null);
+}
+
+test "web replay keeps the composer fill on styled spaces and erased rows" {
+    const alloc = std.testing.allocator;
+    const options: ghostty_vt.Terminal.Options = .{ .cols = 16, .rows = 4 };
+    var source = try ghostty_vt.Terminal.init(alloc, options);
+    defer source.deinit(alloc);
+    var source_stream = source.vtStream();
+    defer source_stream.deinit();
+    source_stream.nextSlice(
+        "\x1b[48;2;30;30;30m\x1b[38;5;250mAsk Codex   \x1b[K\x1b[0m\r\n" ++
+            "\x1b[48;5;238m\x1b[2K\x1b[0m\r\n" ++
+            " \x1b[7m \x1b[0m  tail\x1b[38;2;12;34;56m",
+    );
+
+    const plain = try allocTerminalSnapshot(alloc, &source, 0);
+    defer alloc.free(plain);
+    try std.testing.expectEqualStrings("Ask Codex\r\n\r\n    tail\r\n", plain);
+
+    const snapshot = try allocTerminalSnapshotWithModes(alloc, &source, 0);
+    defer alloc.free(snapshot);
+    var replay = try ghostty_vt.Terminal.init(alloc, options);
+    defer replay.deinit(alloc);
+    var replay_stream = replay.vtStream();
+    defer replay_stream.deinit();
+    replay_stream.nextSlice(snapshot);
+
+    const pages = &replay.screens.active.pages;
+    const label = pages.getCell(.{ .active = .{ .x = 0, .y = 0 } }).?;
+    try std.testing.expectEqual(@as(u21, 'A'), label.cell.codepoint());
+    try std.testing.expect(label.style().fg_color.eql(.{ .palette = 250 }));
+    const gray: ghostty_vt.Style.Color = .{ .rgb = .{ .r = 30, .g = 30, .b = 30 } };
+    for (0..options.cols) |col| {
+        const x: ghostty_vt.size.CellCountInt = @intCast(col);
+        const styled_row = pages.getCell(.{ .active = .{ .x = x, .y = 0 } }).?;
+        try std.testing.expect(gray.eql(styled_row.style().bg_color));
+        const erased_row = pages.getCell(.{ .active = .{ .x = x, .y = 1 } }).?;
+        try std.testing.expect(erased_row.style().bg_color.eql(.{ .palette = 238 }));
+    }
+
+    const inverse = pages.getCell(.{ .active = .{ .x = 1, .y = 2 } }).?;
+    const gap = pages.getCell(.{ .active = .{ .x = 2, .y = 2 } }).?;
+    const empty_row = pages.getCell(.{ .active = .{ .x = 0, .y = 3 } }).?;
+    try std.testing.expect(inverse.style().flags.inverse);
+    try std.testing.expect(gap.style().default());
+    try std.testing.expect(empty_row.style().default());
+    try std.testing.expect(source.screens.active.cursor.style.eql(replay.screens.active.cursor.style));
+}
+
+test "web replay preserves styling across a wrap at a wide grapheme" {
+    const alloc = std.testing.allocator;
+    const options: ghostty_vt.Terminal.Options = .{
+        .cols = 8,
+        .rows = 3,
+        .default_modes = .{ .grapheme_cluster = true },
+    };
+    var source = try ghostty_vt.Terminal.init(alloc, options);
+    defer source.deinit(alloc);
+    var source_stream = source.vtStream();
+    defer source_stream.deinit();
+    source_stream.nextSlice("1234567\x1b[48;5;235m界\xcc\x81 \x1b[0mz");
+
+    const snapshot = try allocTerminalSnapshotWithModes(alloc, &source, 0);
+    defer alloc.free(snapshot);
+    var replay = try ghostty_vt.Terminal.init(alloc, options);
+    defer replay.deinit(alloc);
+    var replay_stream = replay.vtStream();
+    defer replay_stream.deinit();
+    replay_stream.nextSlice(snapshot);
+
+    const first = replay.screens.active.pages.getCell(.{ .active = .{ .x = 0, .y = 0 } }).?;
+    try std.testing.expect(first.row.wrap);
+    const wide = replay.screens.active.pages.getCell(.{ .active = .{ .x = 0, .y = 1 } }).?;
+    try std.testing.expectEqual(@as(u21, '界'), wide.cell.codepoint());
+    try std.testing.expectEqual(.wide, wide.cell.wide);
+    try std.testing.expectEqualSlices(u21, &.{0x301}, wide.node.data.lookupGrapheme(wide.cell).?);
+    try std.testing.expect(wide.style().bg_color.eql(.{ .palette = 235 }));
+    const next = replay.screens.active.pages.getCell(.{ .active = .{ .x = 3, .y = 1 } }).?;
+    try std.testing.expectEqual(@as(u21, 'z'), next.cell.codepoint());
+    try std.testing.expect(next.style().default());
+}
+
+test "web replay preserves the default tail of a styled wrapped row after scrollback" {
+    const alloc = std.testing.allocator;
+    const options: ghostty_vt.Terminal.Options = .{ .cols = 8, .rows = 3 };
+    var source = try ghostty_vt.Terminal.init(alloc, options);
+    defer source.deinit(alloc);
+    var source_stream = source.vtStream();
+    defer source_stream.deinit();
+    source_stream.nextSlice(
+        "history\r\nhistory\r\nhistory\r\nhistory\r\nhistory\r\nhistory" ++
+            "\x1b[2J\x1b[H12345678\x1b[48;5;235ma\x1b[0mz",
+    );
+
+    const snapshot = try allocTerminalSnapshotWithModes(alloc, &source, 10);
+    defer alloc.free(snapshot);
+    var replay = try ghostty_vt.Terminal.init(alloc, options);
+    defer replay.deinit(alloc);
+    var replay_stream = replay.vtStream();
+    defer replay_stream.deinit();
+    replay_stream.nextSlice(snapshot);
+
+    const last_col: ghostty_vt.Point = .{ .active = .{ .x = 7, .y = 1 } };
+    const original_tail = source.screens.active.pages.getCell(last_col).?;
+    const replayed_tail = replay.screens.active.pages.getCell(last_col).?;
+    const replayed_lead = replay.screens.active.pages.getCell(.{ .active = .{ .x = 0, .y = 1 } }).?;
+    try std.testing.expect(snapshotCellStyle(&original_tail.node.data, original_tail.cell).bg_color == .none);
+    try std.testing.expect(snapshotCellStyle(&replayed_tail.node.data, replayed_tail.cell).bg_color == .none);
+    try std.testing.expect(replayed_lead.style().bg_color.eql(.{ .palette = 235 }));
 }
 
 test "soft-wrapped line is joined into one logical line (no \\r\\n mid-wrap)" {

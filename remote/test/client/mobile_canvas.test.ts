@@ -187,6 +187,8 @@ test("shouldStartCanvasPanDrag uses touch primary drag on mobile and middle drag
   assert.equal(shouldStartCanvasPanDrag({ mobile: false, isPrimary: true, button: 0 }), false);
   assert.equal(shouldStartCanvasPanDrag({ mobile: false, isPrimary: true, button: 1 }), true);
   assert.equal(shouldStartCanvasPanDrag({ mobile: false, isPrimary: false, button: 1 }), false);
+  assert.equal(shouldStartCanvasPanDrag({ mobile: false, touch: true, isPrimary: true, button: 0 }), true);
+  assert.equal(shouldStartCanvasPanDrag({ mobile: false, touch: true, isPrimary: false, button: 0 }), false);
 });
 
 test("shouldStartCanvasPanDrag keeps mobile view mode draggable", () => {

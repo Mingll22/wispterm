@@ -23,6 +23,7 @@ export type ResizeCanvasPanOptions = CanvasPanOptions & {
 
 export type CanvasPanDragInput = {
   mobile: boolean;
+  touch?: boolean;
   isPrimary: boolean;
   button: number;
   nativeSelection?: boolean;
@@ -173,11 +174,11 @@ export function isCanvasDrag(delta: CanvasPoint): boolean {
 
 export function shouldStartCanvasPanDrag(input: CanvasPanDragInput): boolean {
   if (!input.isPrimary) return false;
-  return input.mobile ? input.button === 0 : input.button === 1;
+  return input.mobile || input.touch ? input.button === 0 : input.button === 1;
 }
 
 export function shouldDeferCanvasPanPointerDownDefault(input: CanvasPanDragInput): boolean {
-  return input.mobile && input.nativeSelection === true;
+  return (input.mobile || input.touch === true) && input.nativeSelection === true;
 }
 
 export function shouldConsumeCanvasWheel(input: CanvasWheelInput): boolean {

@@ -1,7 +1,8 @@
 import { tr } from "./i18n";
-import { iconAdd, iconDelete } from "./icons";
+import { iconAdd, iconDelete, iconTabControl } from "./icons";
 import { isMobileRemoteShell } from "./mobile_layout";
-import { currentTab, state } from "./state";
+import { currentTab, state, tabControlId } from "./state";
+import { tabControl } from "./tab_control";
 import { sendWorkspaceAction, workspaceActionAvailable, type WorkspaceActionStatus, type WorkspaceCommand } from "./transport";
 import type { LayoutTab } from "./types";
 import { WEB_PANE_LIMIT, workspaceNodes } from "./workspace_layout";
@@ -12,15 +13,23 @@ type WorkspaceCallbacks = {
   selectPane: (surfaceId: string) => void;
   created: () => void;
   previewEnded: () => void;
+  controlChanged: () => void;
 };
+
+export function workspaceTabActionsMarkup(classes = ""): string {
+  return `
+    <div class="workspace-tab-actions${classes}" role="group" aria-label="${tr("Selected tab actions", "当前标签操作")}" hidden>
+      <button type="button" class="icon-button tab-add-pane">${iconAdd()}</button>
+      <button type="button" class="icon-button tab-delete">${iconDelete()}</button>
+      <button type="button" class="icon-button tab-control-toggle" hidden>${iconTabControl(false)}</button>
+    </div>`;
+}
 
 export function bindWorkspaceControls(root: HTMLElement, callbacks: WorkspaceCallbacks) {
   const tabs = root.querySelector<HTMLElement>("#remote-tabs")!;
   const newTab = root.querySelector<HTMLButtonElement>("#new-remote-tab")!;
   const emptyNewTab = root.querySelector<HTMLButtonElement>("#empty-new-remote-tab")!;
-  const mobileActions = root.querySelector<HTMLElement>("#mobile-workspace-actions")!;
-  const mobileAdd = root.querySelector<HTMLButtonElement>("#mobile-add-pane")!;
-  const mobileDelete = root.querySelector<HTMLButtonElement>("#mobile-delete-tab")!;
+  const globalActions = Array.from(root.querySelectorAll<HTMLElement>(".chrome-tab-actions"));
   const dialog = root.querySelector<HTMLDialogElement>("#close-remote-tab")!;
   const description = root.querySelector<HTMLElement>("#close-remote-tab-message")!;
   const status = root.querySelector<HTMLOutputElement>("#workspace-action-status")!;
@@ -40,8 +49,7 @@ export function bindWorkspaceControls(root: HTMLElement, callbacks: WorkspaceCal
 
   newTab.addEventListener("click", () => void run({ action: "create-tab" }));
   emptyNewTab.addEventListener("click", () => void run({ action: "create-tab" }));
-  mobileAdd.addEventListener("click", addPane);
-  mobileDelete.addEventListener("click", requestCloseTab);
+  globalActions.forEach(bindTabActions);
   dialog.addEventListener("close", () => {
     const action = confirmedAction;
     confirmedAction = null;
@@ -73,6 +81,14 @@ export function bindWorkspaceControls(root: HTMLElement, callbacks: WorkspaceCal
     if (!tab?.workspace || !last || tab.surfaces.length >= WEB_PANE_LIMIT) return;
     const { tabId, layoutRevision } = tab.workspace;
     void run({ action: "add-pane", tabId, layoutRevision, surfaceId: last.id });
+  }
+
+  function toggleControl(): void {
+    const tabId = tabControlId();
+    if (!tabId) return;
+    if (tabControl.leaseId(tabId) === undefined) tabControl.takeOver(tabId);
+    else tabControl.release(tabId);
+    callbacks.controlChanged();
   }
 
   function requestCloseTab(): void {
@@ -131,37 +147,41 @@ export function bindWorkspaceControls(root: HTMLElement, callbacks: WorkspaceCal
     row.dataset.tabKey = key;
     row.innerHTML = `
       <button type="button" class="tab-chip"><span class="tab-chip-label"></span></button>
-      <div class="workspace-tab-actions" role="group" aria-label="${tr("Selected tab actions", "当前标签操作")}" hidden>
-        <button type="button" class="icon-button tab-add-pane">${iconAdd()}</button>
-        <button type="button" class="icon-button tab-delete">${iconDelete()}</button>
-      </div>
+      ${workspaceTabActionsMarkup()}
       <span class="tab-chip-count" aria-hidden="true"></span>`;
     const button = row.querySelector<HTMLButtonElement>(".tab-chip")!;
     const select = () => callbacks.selectTab(Number(button.dataset.tabIndex));
     button.addEventListener("click", select);
     row.querySelector(".tab-chip-count")?.addEventListener("click", select);
-    row.querySelector(".tab-add-pane")?.addEventListener("click", addPane);
-    row.querySelector(".tab-delete")?.addEventListener("click", requestCloseTab);
+    bindTabActions(row);
     return row;
+  }
+
+  function bindTabActions(element: HTMLElement): void {
+    element.querySelector(".tab-add-pane")?.addEventListener("click", addPane);
+    element.querySelector(".tab-delete")?.addEventListener("click", requestCloseTab);
+    element.querySelector(".tab-control-toggle")?.addEventListener("click", toggleControl);
   }
 
   function update(): void {
     const tab = currentTab();
-    const available = workspaceActionAvailable();
     const supported = state.layoutState?.workspaceActions === true;
     newTab.hidden = !supported;
     emptyNewTab.hidden = !supported;
-    newTab.disabled = !available;
-    emptyNewTab.disabled = !available;
-    mobileActions.hidden = !tab?.workspace;
+    newTab.disabled = !workspaceActionAvailable();
+    emptyNewTab.disabled = newTab.disabled;
+    const canEdit = Boolean(tab?.workspace && workspaceActionAvailable(tab));
     for (const group of tabs.querySelectorAll<HTMLElement>(".workspace-tab-actions")) {
       const current = Boolean(tab?.workspace && group.parentElement?.dataset.tabKey === tab.workspace.tabId);
       group.hidden = !current;
-      if (current && tab) updateTabActions(group.querySelector(".tab-add-pane")!, group.querySelector(".tab-delete")!, tab, available);
+      if (current && tab) updateTabActions(group, tab, canEdit);
     }
-    if (tab?.workspace) updateTabActions(mobileAdd, mobileDelete, tab, available);
+    for (const group of globalActions) {
+      group.hidden = !tab?.workspace;
+      if (tab?.workspace) updateTabActions(group, tab, canEdit);
+    }
     const mirror = (isMobileRemoteShell() ? state.mobilePanelMode : state.desktopPanelMode) === "layout";
-    panels.update(tab, mirror, available);
+    panels.update(tab, mirror, canEdit);
   }
 
   return { renderTabs, update };
@@ -171,22 +191,41 @@ function tabTitle(tab: LayoutTab): string {
   return tab.title?.trim() || tr(`Tab ${tab.index + 1}`, `标签页 ${tab.index + 1}`);
 }
 
-function updateTabActions(add: HTMLButtonElement, remove: HTMLButtonElement, tab: LayoutTab, available: boolean): void {
+function updateTabActions(group: HTMLElement, tab: LayoutTab, available: boolean): void {
+  const add = group.querySelector<HTMLButtonElement>(".tab-add-pane")!;
+  const remove = group.querySelector<HTMLButtonElement>(".tab-delete")!;
+  const control = group.querySelector<HTMLButtonElement>(".tab-control-toggle")!;
   const limit = tab.surfaces.length >= WEB_PANE_LIMIT;
   const title = tabTitle(tab);
+  const tabId = tabControlId(tab);
+  const held = tabId !== undefined && tabControl.leaseId(tabId) !== undefined;
+  const requiresControl = tabId !== undefined && !held;
+  const readOnlyHint = requiresControl ? tr("Take control of this tab to make changes", "接管当前标签后可修改") : null;
   const addLabel = tr(`Add terminal to ${title}`, `在「${title}」新增终端`);
   add.disabled = !available || limit;
-  add.title = limit ? tr("Up to four terminals can be added from the web", "网页端最多新增到四个终端") : addLabel;
+  add.title = limit ? tr("Up to four terminals can be added from the web", "网页端最多新增到四个终端") : readOnlyHint ?? addLabel;
   add.setAttribute("aria-label", addLabel);
   remove.disabled = !available;
-  remove.title = tr(`Delete tab ${title}`, `删除标签「${title}」`);
-  remove.setAttribute("aria-label", remove.title);
+  const removeLabel = tr(`Delete tab ${title}`, `删除标签「${title}」`);
+  remove.title = readOnlyHint ?? removeLabel;
+  remove.setAttribute("aria-label", removeLabel);
+  control.hidden = !tabId;
+  control.disabled = !tabControl.isAvailable();
+  if (control.hasAttribute("data-held") !== held) {
+    control.toggleAttribute("data-held", held);
+    control.innerHTML = iconTabControl(held);
+  }
+  control.title = held
+    ? tr(`Return tab ${title} to WispTerm`, `归还标签「${title}」`)
+    : tr(`Take control of tab ${title}`, `接管标签「${title}」`);
+  control.setAttribute("aria-label", control.title);
 }
 
 function actionFeedback(outcome: WorkspaceActionStatus): string {
   switch (outcome) {
     case "ok": return "";
     case "stale": return tr("The desktop layout changed. Try again from the updated layout.", "桌面布局已变化，请在更新后的布局中重试。");
+    case "denied": return tr("Take control of the tab before making changes.", "请接管当前标签后再修改。");
     case "protected": return tr("A terminal is running a program. Confirm its closure in WispTerm.", "终端中有程序在运行，请在 WispTerm 桌面端确认关闭。");
     case "limit": return tr("WispTerm has reached the tab or pane limit.", "已达到 WispTerm 的标签或面板上限。");
     case "unsupported": return tr("WispTerm cannot perform this action on the selected tab.", "WispTerm 无法在当前标签执行此操作。");

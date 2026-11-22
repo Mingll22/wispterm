@@ -1,5 +1,6 @@
 import type { LayoutState, LayoutTab, MobileInputMode, SurfaceView } from "./types";
 import { terminalControl } from "./terminal_control";
+import { tabControl } from "./tab_control";
 import {
   readSavedDesktopPanelMode,
   readSavedMobilePanelMode,
@@ -41,8 +42,18 @@ export function activeSurfaceIdForInput(): string | null {
   if (!surfaceId) return null;
   const surface = tab?.surfaces.find((candidate) => candidate.id === surfaceId);
   if (surface?.kind === "ai_chat") return null;
-  if (surface?.terminalControl && terminalControl.leaseId(surfaceId) === undefined) return null;
+  if ((surface?.terminalControl || tabControlId(tab)) && inputLeaseId(surfaceId, tab) === undefined) return null;
   return surface?.readOnly ? null : surfaceId;
+}
+
+export function tabControlId(tab = currentTab()): string | undefined {
+  return state.layoutState?.tabControl ? tab?.workspace?.tabId : undefined;
+}
+
+export function inputLeaseId(surfaceId: string, tab = currentTab()): number | undefined {
+  const tabId = tabControlId(tab);
+  if (!tabId) return terminalControl.leaseId(surfaceId);
+  return tab?.surfaces.some((surface) => surface.id === surfaceId) ? tabControl.leaseId(tabId) : undefined;
 }
 
 export function resetSurfaceViews(): void {

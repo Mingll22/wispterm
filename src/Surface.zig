@@ -211,6 +211,31 @@ pub const VtHandler = struct {
         );
     }
 
+    /// The read-only Ghostty handler tracks OSC color changes but leaves
+    /// queries to its host. Reply on the originating PTY using its colors.
+    fn replyToColorQueries(self: *VtHandler, op: ghostty_vt.StreamAction.Value(.color_operation)) void {
+        var requests = op.requests.constIterator(0);
+        while (requests.next()) |request| {
+            if (request.* != .query or request.query != .dynamic) continue;
+            const slot = request.query.dynamic;
+            const colors = &self.inner.terminal.colors;
+            const theme = self.surface.terminal_theme_colors;
+            const rgb = switch (slot) {
+                .foreground => colors.foreground.get() orelse theme.foreground,
+                .background => colors.background.get() orelse theme.background,
+                else => continue,
+            };
+
+            var buf: [40]u8 = undefined;
+            const response = std.fmt.bufPrintZ(
+                &buf,
+                "\x1b]{d};rgb:{x:0>4}/{x:0>4}/{x:0>4}{s}",
+                .{ @intFromEnum(slot), @as(u16, rgb.r) * 257, @as(u16, rgb.g) * 257, @as(u16, rgb.b) * 257, op.terminator.string() },
+            ) catch unreachable;
+            writePtyResponse(&self.inner, response);
+        }
+    }
+
     pub fn deinit(self: *VtHandler) void {
         self.inner.deinit();
     }
@@ -258,6 +283,7 @@ pub const VtHandler = struct {
             else => false,
         };
         self.inner.vt(action, value);
+        if (action == .color_operation) self.replyToColorQueries(value);
         const sync_after = self.surface.terminal.modes.get(.synchronized_output);
         if (sync_mode_touched or sync_before != sync_after) {
             self.surface.noteSynchronizedOutputMode(sync_after);
@@ -272,8 +298,41 @@ pub const VtStream = ghostty_vt.Stream(VtHandler);
 // Core state
 // ============================================================================
 
+const TerminalThemeColors = struct {
+    foreground: ghostty_vt.color.RGB,
+    background: ghostty_vt.color.RGB,
+
+    fn fromTheme(theme: Config.Theme) TerminalThemeColors {
+        return .{
+            .foreground = rgbFromColor(theme.foreground),
+            .background = rgbFromColor(theme.background),
+        };
+    }
+
+    fn rgbFromColor(color: Config.Color) ghostty_vt.color.RGB {
+        return .{
+            .r = @intFromFloat(@round(color[0] * 255)),
+            .g = @intFromFloat(@round(color[1] * 255)),
+            .b = @intFromFloat(@round(color[2] * 255)),
+        };
+    }
+};
+
+// Each window supplies its defaults from its own UI thread. Surfaces retain a
+// copy for use by their PTY reader under the render-state mutex.
+threadlocal var creation_theme_colors = TerminalThemeColors.fromTheme(Config.Theme.default());
+
+pub fn setCreationThemeColors(theme: Config.Theme) void {
+    creation_theme_colors = TerminalThemeColors.fromTheme(theme);
+}
+
+pub fn updateTerminalThemeColorsLocked(self: *Surface, theme: Config.Theme) void {
+    self.terminal_theme_colors = TerminalThemeColors.fromTheme(theme);
+}
+
 allocator: std.mem.Allocator,
 terminal: ghostty_vt.Terminal,
+terminal_theme_colors: TerminalThemeColors,
 pty: Pty,
 command: Command,
 selection: Selection,
@@ -599,6 +658,7 @@ fn finishInit(
     surface.allocator = allocator;
     surface.selection = .{};
     surface.render_state = renderer.State.init(&surface.terminal);
+    surface.terminal_theme_colors = creation_theme_colors;
     surface.launch_kind = launch_kind;
     surface.advertise_terminal_capabilities = advertise_terminal_capabilities;
     surface.ssh_connection = null;
@@ -1237,6 +1297,13 @@ pub fn setRemoteWorkspaceLayout(self: *Surface, layout: DesktopLayout) void {
 
 const LayoutOrigin = enum { desktop, remote_workspace };
 
+pub fn desktopLayoutChanged(self: *Surface, layout: DesktopLayout) bool {
+    self.remote_terminal.mutex.lock();
+    defer self.remote_terminal.mutex.unlock();
+    const previous = self.remote_terminal.desktop_layout orelse return false;
+    return !std.meta.eql(previous, layout);
+}
+
 fn applyDesktopLayout(self: *Surface, layout: DesktopLayout, resize_policy: ResizePolicy, origin: LayoutOrigin) bool {
     self.remote_terminal.mutex.lock();
     defer self.remote_terminal.mutex.unlock();
@@ -1257,7 +1324,7 @@ fn applyDesktopLayout(self: *Surface, layout: DesktopLayout, resize_policy: Resi
     const target = state.targetGrid();
     if (!remote_control.sameGrid(previous_target, target)) self.queueGrid(target, resize_policy);
     // Keep native mouse/selection geometry aligned with the remotely sized VT.
-    if (state.holder != null) self.size.grid = self.confirmedGrid();
+    if (state.active()) self.size.grid = self.confirmedGrid();
     return !remote_control.sameGrid(previous_desktop, state.desktop_grid);
 }
 
@@ -1284,8 +1351,7 @@ pub fn prepareResize(self: *Surface, grid: GridSize) ?ResizePixels {
     self.remote_terminal.mutex.lock();
     defer self.remote_terminal.mutex.unlock();
     if (self.remote_terminal.enabled) self.expireRemoteControlLocked();
-    if (!remote_control.sameGrid(self.remote_terminal.state.targetGrid(), grid) or
-        remote_control.sameGrid(self.confirmedGrid(), grid)) return null;
+    if (!self.remote_terminal.state.admitsGrid(grid) or remote_control.sameGrid(self.confirmedGrid(), grid)) return null;
     return .{
         .width = @intFromFloat(@as(f32, @floatFromInt(grid.cols)) * self.size.cell.width),
         .height = @intFromFloat(@as(f32, @floatFromInt(grid.rows)) * self.size.cell.height),
@@ -1301,14 +1367,47 @@ pub fn commitTerminalGridLocked(self: *Surface, grid: GridSize) void {
 }
 
 pub fn supportsRemoteControl(self: *Surface) bool {
-    return self.remote_terminal.enabled and self.acceptsInput();
+    if (!self.remote_terminal.enabled or !self.acceptsInput()) return false;
+    self.remote_terminal.mutex.lock();
+    defer self.remote_terminal.mutex.unlock();
+    return !self.remote_terminal.state.tabManaged();
+}
+
+pub fn supportsTabControl(self: *const Surface) bool {
+    return self.remote_terminal.enabled;
 }
 
 pub fn remoteControlActive(self: *Surface) bool {
     if (!self.remote_terminal.enabled) return false;
     self.remote_terminal.mutex.lock();
     defer self.remote_terminal.mutex.unlock();
-    return self.remote_terminal.state.holder != null;
+    return self.remote_terminal.state.active();
+}
+
+/// The tab controller locks all affected surfaces before changing ownership.
+pub fn lockRemoteTabControl(self: *Surface) void {
+    self.remote_terminal.mutex.lock();
+}
+
+pub fn unlockRemoteTabControl(self: *Surface) void {
+    self.remote_terminal.mutex.unlock();
+}
+
+pub fn setRemoteTabControlLocked(self: *Surface, managed: bool, grant: ?remote_control.TabGrant, policy: ResizePolicy) void {
+    const state = &self.remote_terminal.state;
+    const previous = state.targetGrid();
+    const had_legacy_holder = state.holder != null;
+    state.mirrorTab(managed, grant, self.confirmedGrid());
+    const target = state.targetGrid();
+    if (!remote_control.sameGrid(previous, target)) self.queueGrid(target, policy);
+    if (had_legacy_holder and state.holder == null) self.publishControlStateLocked(.released);
+}
+
+pub fn setRemoteTabGridLocked(self: *Surface, grid: GridSize) void {
+    const state = &self.remote_terminal.state;
+    if (remote_control.sameGrid(state.targetGrid(), grid)) return;
+    state.setTabGrid(grid);
+    self.queueGrid(grid, .coalesced);
 }
 
 fn queueGrid(self: *Surface, grid: GridSize, policy: ResizePolicy) void {
@@ -1425,10 +1524,10 @@ pub fn queueIo(self: *Surface, msg: termio.Message) void {
 /// success — the caller decides how loud to be. We NEVER use msg.deinit() to
 /// implicitly mean "delivered".
 pub fn queuePtyWrite(self: *Surface, data: []const u8) QueueWriteError!void {
-    return self.queueControlledWrite(data, .{});
+    return self.queueControlledWrite(data, null);
 }
 
-fn queueControlledWrite(self: *Surface, data: []const u8, identity: remote_control.Identity) QueueWriteError!void {
+fn queueControlledWrite(self: *Surface, data: []const u8, identity: ?remote_control.Identity) QueueWriteError!void {
     if (!self.acceptsInput()) return error.SurfaceExited;
     const epoch: ?u64 = if (self.remote_terminal.enabled) blk: {
         self.remote_terminal.mutex.lock();
@@ -1445,7 +1544,7 @@ pub fn admitPtyWrite(self: *Surface, epoch: ?u64) bool {
     self.remote_terminal.mutex.lock();
     defer self.remote_terminal.mutex.unlock();
     self.expireRemoteControlLocked();
-    return self.remote_terminal.state.input_epoch == authorized_epoch;
+    return self.remote_terminal.state.admitsEpoch(authorized_epoch);
 }
 
 fn queuePtyWriteImpl(self: *Surface, data: []const u8, epoch: ?u64) QueueWriteError!void {
@@ -2176,6 +2275,7 @@ fn vtResponseHarness(surface: *Surface) !void {
         .cols = 80,
         .rows = 24,
     });
+    surface.terminal_theme_colors = TerminalThemeColors.fromTheme(Config.Theme.default());
     surface.mailbox = try termio.Mailbox.init();
     surface.vt_stream = surface.initVtStream();
     surface.io_state_mutex = .{};
@@ -2240,6 +2340,29 @@ test "primary device attributes query is answered back to the PTY" {
         },
         else => return error.UnexpectedMessage,
     }
+}
+
+test "OSC color queries report the surface's desktop colors to the PTY" {
+    var surface: Surface = undefined;
+    try vtResponseHarness(&surface);
+    defer vtResponseHarnessDeinit(&surface);
+    surface.updateTerminalThemeColorsLocked(Config.Theme.parseThemeContent(
+        "foreground = #abcdef\nbackground = #234567",
+    ));
+
+    // Codex probes both defaults before drawing its composer fill. A
+    // compound query advances from foreground (10) to background (11).
+    surface.vt_stream.nextSlice("\x1b]10;?;?\x1b\\");
+    try expectPtyResponse(&surface, "\x1b]10;rgb:abab/cdcd/efef\x1b\\");
+    try expectPtyResponse(&surface, "\x1b]11;rgb:2323/4545/6767\x1b\\");
+
+    surface.vt_stream.nextSlice("\x1b]11;#111213\x07");
+    try std.testing.expect(surface.mailbox.popWrite() == null);
+    surface.vt_stream.nextSlice("\x1b]11;?\x07");
+    try expectPtyResponse(&surface, "\x1b]11;rgb:1111/1212/1313\x07");
+
+    surface.vt_stream.nextSlice("\x1b]111\x07\x1b]11;?\x07");
+    try expectPtyResponse(&surface, "\x1b]11;rgb:2323/4545/6767\x07");
 }
 
 test "XTVERSION query reports WispTerm and its version" {
@@ -2352,6 +2475,106 @@ test "native geometry reclaims an unchanged cell grid and drops stale leased inp
     try std.testing.expect(!surface.admitPtyWrite(queued.write_small.input_epoch));
     try std.testing.expect(surface.prepareResize(.{}) == null);
     try surface.queuePtyWrite("desktop");
+}
+
+test "a tab takeover fences both PTY mailboxes and restores each desktop grid on reclaim" {
+    const allocator = std.testing.allocator;
+    const SplitTree = @import("split_tree.zig");
+    const TabControl = @import("appwindow/remote_tab_control.zig").State;
+    var a: Surface = undefined;
+    try writeOutcomeHarness(&a);
+    defer writeOutcomeHarnessDeinit(&a);
+    var b: Surface = undefined;
+    try writeOutcomeHarness(&b);
+    defer writeOutcomeHarnessDeinit(&b);
+    const surfaces = [_]*Surface{ &a, &b };
+    const desktop_grids = [_]GridSize{ .{ .cols = 88, .rows = 29 }, .{ .cols = 70, .rows = 27 } };
+
+    var hub = RemoteHub.Hub.init(allocator);
+    defer hub.deinit();
+    for (surfaces, desktop_grids, 1..) |surface, grid, id| {
+        surface.remote_terminal.enabled = true;
+        surface.remote_terminal.clock = try std.time.Timer.start();
+        surface.remote_terminal.state.desktop_grid = grid;
+        surface.size = .{};
+        surface.ref_count = 1;
+        surface.confirmed_grid = .init(packGrid(grid));
+        surface.remote_hub = .init(null);
+        surface.remote_id = @import("remote_workspace.zig").formatId(id);
+        surface.attachRemoteHub(&hub);
+    }
+
+    const nodes = [_]SplitTree.Node{
+        .{ .split = .{ .layout = .horizontal, .ratio = 0.5, .left = @enumFromInt(1), .right = @enumFromInt(2) } },
+        .{ .leaf = .{ .terminal = &a } },
+        .{ .leaf = .{ .terminal = &b } },
+    };
+    var tree = try SplitTree.cloneNodes(allocator, &nodes, null);
+    defer tree.deinit();
+    var control: TabControl = .{};
+    control.setEnabled(&tree, true);
+    remoteControlRequest(&a, .{ .client_id = "legacy", .action = .takeover });
+    try std.testing.expect(!a.remoteControlActive());
+    try std.testing.expectError(error.RemoteControlActive, a.queueControlledWrite("unleased browser input", .{ .client_id = "phone" }));
+
+    var request: remote_control.TabRequest = .{
+        .type = "tab-control",
+        .tabId = "1000000000000001".*,
+        .clientId = "phone",
+        .action = .acquire,
+    };
+    control.request(&tree, &hub, request);
+    const old: remote_control.Identity = .{ .client_id = "phone", .lease_id = control.lease.grant.?.id };
+    for (surfaces) |surface| {
+        try surface.queueControlledWrite("valid", old);
+        try std.testing.expectError(error.RemoteControlActive, surface.queuePtyWrite("desktop"));
+    }
+
+    const remote_grid: GridSize = .{ .cols = 44, .rows = 15 };
+    var grids = [_]remote_control.TabGrid{
+        .{ .surfaceId = a.remote_id, .cols = remote_grid.cols, .rows = remote_grid.rows },
+        .{ .surfaceId = "000000000000001f".*, .cols = desktop_grids[1].cols, .rows = desktop_grids[1].rows },
+    };
+    request.action = .resize;
+    request.leaseId = old.lease_id;
+    request.grids = &grids;
+    control.request(&tree, &hub, request);
+    try std.testing.expect(a.mailbox.takePendingResize() == null);
+    try std.testing.expect(b.mailbox.takePendingResize() == null);
+
+    grids[1].surfaceId = b.remote_id;
+    control.request(&tree, &hub, request);
+    try std.testing.expectEqual(remote_grid, a.mailbox.takePendingResize().?);
+    try std.testing.expect(b.mailbox.takePendingResize() == null);
+    // A writer has already confirmed this grid before the next owner arrives.
+    a.confirmed_grid.store(packGrid(remote_grid), .release);
+
+    request.action = .takeover;
+    request.clientId = "tablet";
+    request.leaseId = null;
+    request.grids = null;
+    control.request(&tree, &hub, request);
+    const current: remote_control.Identity = .{ .client_id = "tablet", .lease_id = control.lease.grant.?.id };
+    try std.testing.expect(current.lease_id != old.lease_id);
+    for (surfaces) |surface| {
+        const queued = surface.mailbox.popWrite() orelse return error.MissingLeasedWrite;
+        defer queued.deinit();
+        try std.testing.expect(!surface.admitPtyWrite(queued.write_small.input_epoch));
+        try std.testing.expectError(error.RemoteControlActive, surface.queueControlledWrite("stale", old));
+        try surface.queueControlledWrite("current", current);
+    }
+    try std.testing.expect(a.mailbox.takePendingImmediateResize() == null);
+
+    try std.testing.expect(control.reclaim(&tree, &hub, request.tabId, .desktop, .coalesced));
+    for (surfaces) |surface| {
+        const queued = surface.mailbox.popWrite() orelse return error.MissingLeasedWrite;
+        defer queued.deinit();
+        try std.testing.expect(!surface.admitPtyWrite(queued.write_small.input_epoch));
+        try std.testing.expectError(error.RemoteControlActive, surface.queueControlledWrite("released", current));
+        try surface.queuePtyWrite("desktop");
+    }
+    try std.testing.expectEqual(desktop_grids[0], a.mailbox.takePendingResize().?);
+    try std.testing.expect(b.mailbox.takePendingResize() == null);
 }
 
 test "web workspace geometry preserves the lease and only changes the natural grid" {

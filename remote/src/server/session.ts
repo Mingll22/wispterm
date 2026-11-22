@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { WebSocket } from "ws";
 import { browserWorkspaceAction, hostWorkspaceResult } from "./workspace_protocol.js";
-import { browserTerminalMessage, hostTerminalMessage, type TerminalGridMessage } from "./terminal_control_protocol.js";
+import { browserTabControl, hostTabControlState, browserTerminalMessage, hostTerminalMessage, type TerminalGridMessage } from "./terminal_control_protocol.js";
 
 export type RelayMessage = {
   type?: string;
@@ -14,6 +14,7 @@ export type RelayMessage = {
   status?: string;
   wisptermConnected?: boolean;
   activeTab?: number;
+  tabControl?: boolean;
   tabs?: Array<{
     index: number;
     focusedSurfaceId?: string;
@@ -261,6 +262,9 @@ export class RemoteSession {
           encoding: message.encoding,
           data: message.data,
         });
+      } else if (message.type === "tab-control-state") {
+        const state = hostTabControlState(message);
+        if (state) this.broadcast(state);
       } else if (message.type === "terminal-control-state" || message.type === "terminal-grid") {
         const terminalMessage = hostTerminalMessage(message);
         if (terminalMessage) {
@@ -319,7 +323,7 @@ export class RemoteSession {
         }
         return;
       }
-      const terminalMessage = browserTerminalMessage(message, clientId);
+      const terminalMessage = browserTabControl(message, clientId) ?? browserTerminalMessage(message, clientId);
       if (terminalMessage && this.wispterm) safeSend(this.wispterm, terminalMessage);
     });
 

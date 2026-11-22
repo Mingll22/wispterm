@@ -1,7 +1,7 @@
 // Wire validation only: the desktop owns revision and surface membership checks.
 export type WorkspaceNode = { surfaceId: string } | { axis: "x" | "y"; ratio: number };
 type WorkspaceBase = { type: "workspace-action"; requestId: string };
-type WorkspaceTarget = { tabId: string; layoutRevision: string };
+type WorkspaceTarget = { tabId: string; layoutRevision: string; leaseId?: number };
 export type WorkspaceAction =
   | (WorkspaceBase & { action: "create-tab" })
   | (WorkspaceBase & WorkspaceTarget & { action: "add-pane" | "close-pane"; surfaceId: string })
@@ -10,15 +10,18 @@ export type WorkspaceAction =
 export type WorkspaceResult = {
   type: "workspace-action-result";
   requestId: string;
-  status: "ok" | "stale" | "unsupported" | "protected" | "limit" | "failed" | "offline";
+  status: "ok" | "stale" | "unsupported" | "protected" | "limit" | "failed" | "denied" | "offline";
   tabId?: string;
   surfaceId?: string;
 };
 
 type RecordValue = Record<string, unknown>;
-const statuses = new Set(["ok", "stale", "unsupported", "protected", "limit", "failed"]);
+const statuses = new Set(["ok", "stale", "unsupported", "protected", "limit", "failed", "denied"]);
 const record = (value: unknown): value is RecordValue => typeof value === "object" && value !== null && !Array.isArray(value);
 export const isWorkspaceId = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{16}(?![\s\S])/.test(value);
+export function validLeaseId(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 0xffffffff;
+}
 const requestId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{1,64}(?![\s\S])/.test(value);
 
 export function parseWorkspaceTree(value: unknown): WorkspaceNode[] | null {
@@ -43,11 +46,12 @@ export function browserWorkspaceAction(value: unknown, clientId: string): (Works
   if (!record(value) || value.type !== "workspace-action" || !requestId(value.requestId)) return null;
   const base = { type: "workspace-action" as const, requestId: value.requestId, clientId };
   if (value.action === "create-tab") {
-    if (value.tabId !== undefined || value.layoutRevision !== undefined || value.surfaceId !== undefined || value.splitTree !== undefined) return null;
+    if (value.tabId !== undefined || value.layoutRevision !== undefined || value.surfaceId !== undefined || value.splitTree !== undefined || value.leaseId !== undefined) return null;
     return { ...base, action: "create-tab" };
   }
-  if (!isWorkspaceId(value.tabId) || !isWorkspaceId(value.layoutRevision)) return null;
-  const target = { tabId: value.tabId, layoutRevision: value.layoutRevision };
+  if (!isWorkspaceId(value.tabId) || !isWorkspaceId(value.layoutRevision) ||
+      (value.leaseId !== undefined && !validLeaseId(value.leaseId))) return null;
+  const target = { tabId: value.tabId, layoutRevision: value.layoutRevision, ...(value.leaseId === undefined ? {} : { leaseId: value.leaseId as number }) };
   if (value.action === "add-pane" || value.action === "close-pane") {
     if (!isWorkspaceId(value.surfaceId) || value.splitTree !== undefined) return null;
     return { ...base, ...target, action: value.action, surfaceId: value.surfaceId };

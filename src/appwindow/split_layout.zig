@@ -340,26 +340,34 @@ pub fn updateRemoteWindowGeometry(width: i32, height: i32) void {
     for (tab.g_tabs[0..tab.g_tab_count]) |maybe_tab| {
         const tab_state = maybe_tab orelse continue;
         if (tab_state.tree.isEmpty()) continue;
+        const reclaimed_tab = tab_state.reclaimRemoteTabControl(.desktop, .coalesced);
         var spatial = tab_state.tree.spatial(allocator) catch continue;
         defer spatial.deinit(allocator);
         var it = tab_state.tree.surfaces();
         while (it.next()) |entry| {
-            if (!entry.surface.supportsRemoteControl()) continue;
-            if (tab_state == active_tab and !entry.surface.remoteControlActive()) continue;
+            if (!entry.surface.supportsTabControl()) continue;
+            if (tab_state == active_tab and !reclaimed_tab and !entry.surface.remoteControlActive()) continue;
             const slot = spatial.slots[entry.handle.idx()];
             _ = entry.surface.setScreenSizeWithPolicy(desktopLayout(panePixelRect(slot, content), content, slot), .coalesced);
         }
     }
 }
 
-/// Claim each affected PTY at the desktop input event, before the next paint
-/// computes its new natural grid. Other split subtrees keep their leases.
+/// A desktop divider edit reclaims the tab at the input event, before the
+/// paint computes its new natural grid. Legacy PTYs retain subtree ownership.
 pub fn reclaimSplitControls(tree: *const SplitTree, handle: SplitTree.Node.Handle) void {
+    if (tab.activeTab()) |state| {
+        if (&state.tree == tree and state.reclaimRemoteTabControl(.desktop, .coalesced)) return;
+    }
+    reclaimLegacyControls(tree, handle);
+}
+
+fn reclaimLegacyControls(tree: *const SplitTree, handle: SplitTree.Node.Handle) void {
     switch (tree.nodes[handle.idx()]) {
         .leaf => |pane| if (pane.surface()) |surface| surface.reclaimRemoteControl(),
         .split => |split| {
-            reclaimSplitControls(tree, split.left);
-            reclaimSplitControls(tree, split.right);
+            reclaimLegacyControls(tree, split.left);
+            reclaimLegacyControls(tree, split.right);
         },
     }
 }
@@ -368,7 +376,7 @@ pub fn reclaimSplitControls(tree: *const SplitTree, handle: SplitTree.Node.Handl
 /// Each surface is resized to fit its allocated area with proper padding.
 /// Returns the number of surfaces (0 if tree is empty).
 pub fn computeSplitLayout(
-    active_tab: *const TabState,
+    active_tab: *TabState,
     content_x: i32,
     content_y: i32,
     content_w: i32,
@@ -412,7 +420,11 @@ pub fn computeSplitLayout(
         // bookkeeping. Non-terminal panes (e.g. previews) have no grid to size,
         // so we skip this entirely and store zero cols/rows for them.
         if (entry.pane.surface()) |surface| {
-            const resized = surface.setScreenSizeWithPolicy(desktopLayout(rect, content, slot), resize_policy);
+            const layout = desktopLayout(rect, content, slot);
+            if (active_tab.remote_tab_control.lease.grant != null and surface.desktopLayoutChanged(layout)) {
+                _ = active_tab.reclaimRemoteTabControl(.desktop, resize_policy);
+            }
+            const resized = surface.setScreenSizeWithPolicy(layout, resize_policy);
 
             if (resized) {
                 AppWindow.applyUiEffect(.{ .needs_rebuild = true });
@@ -508,7 +520,7 @@ test "split_layout: paneless tab consumes the immediate-resize request" {
     // render gate re-renders while it is pending. A paneless tab (AI Chat,
     // Settings, …) must still consume it, or the loop never goes idle.
     defer _ = AppWindow.consumeImmediateLayoutResize();
-    const ai_chat_tab = TabState{ .kind = .ai_chat, .tree = SplitTree.empty };
+    var ai_chat_tab = TabState{ .kind = .ai_chat, .tree = SplitTree.empty };
 
     AppWindow.requestImmediateLayoutResize();
     try std.testing.expectEqual(@as(usize, 0), computeSplitLayout(&ai_chat_tab, 0, 0, 800, 600, 8, 16));

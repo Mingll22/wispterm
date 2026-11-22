@@ -269,7 +269,8 @@ The WispTerm client sends PTY bytes as:
 WispTerm also sends layout snapshots so the browser can render tabs and split
 panels separately. Each surface may include a snapshot of its screen plus recent
 scrollback (up to 10,000 history rows), so a newly opened browser can show the
-latest terminal content and scroll back through it:
+latest terminal content and scroll back through it. Terminal snapshots preserve
+VT cell colors and input modes when the browser first connects:
 
 ```json
 { "type": "layout", "activeTab": 0, "tabs": [{ "surfaces": [{ "cols": 120, "rows": 32, "cursorX": 0, "cursorY": 31, "snapshot": "..." }] }] }
@@ -283,18 +284,24 @@ Browser input is routed back to the selected surface:
 
 ### Responsive terminal control
 
-Browser clients can control a directly backed terminal when its layout advertises
-`terminalControl: true`. Each visible pane requests a 60-second desktop lease
-with its measured character grid. A foreground browser renews every 20 seconds
-and sends resize requests when its measured rows or columns change.
+When the desktop advertises `tabControl: true`, an editable terminal tab has
+one 60-second lease for all its panes. A foreground browser requests the selected
+tab with `tab-control`, renews it once every 20 seconds, and sends the measured
+rows and columns of the visible panes when they change. A single-pane view
+measures the displayed pane while the same lease covers the rest of the tab.
 
-Only one browser can send input or resize a given leased terminal. A second
-browser can view its live output and choose **Take control**. Closing the pane
-or choosing **Release** returns its grid to the desktop. Desktop window and
-split changes also return control immediately. Detached clients lose their
-lease when it expires. The desktop applies PTY resizes only when the effective
-grid changes and broadcasts the new grid in order with the terminal byte stream.
-Other terminal panes and AI Chat use their existing paths.
+A second browser can view the tab and explicitly choose **Take control** to
+take over the whole group. Switching tabs, choosing **Release**, or letting the
+lease expire restores the desktop grids. Desktop window or split changes
+reclaim the affected tab immediately. The desktop applies PTY resizes only when
+the effective grid changes and sends the new grid in order with terminal output.
+Older desktops and terminals outside an editable group can still advertise
+per-pane control through `terminalControl: true`.
+
+Use the current tab actions in the selected sidebar row, collapsed desktop
+rail, or mobile toolbar to add a pane, delete the tab, or transfer control.
+The mouse wheel or a vertical touch swipe scrolls the terminal's history.
+Mirrored splits highlight the pane selected for interaction.
 
 ### Workspace actions
 
@@ -306,7 +313,8 @@ splits top/bottom.
 
 An authenticated, paired browser submits `workspace-action` with a `requestId`
 and one of `create-tab`, `add-pane`, `close-pane`, `close-tab`, or `set-layout`.
-Tab actions include the published `tabId` and `layoutRevision`. Pane actions
+Tab actions include the published `tabId` and `layoutRevision`. A group under
+tab control also requires the current `leaseId` for these changes. Pane actions
 also provide a stable `surfaceId`, and `set-layout` carries the new tree for
 the same terminals. The desktop rejects outdated revisions and checks the
 target before applying a change. The relay routes `workspace-action-result`

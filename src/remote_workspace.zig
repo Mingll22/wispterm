@@ -22,11 +22,12 @@ pub const Request = struct {
     action: Action,
     tabId: ?Id = null,
     layoutRevision: ?Id = null,
+    leaseId: ?u32 = null,
     surfaceId: ?Id = null,
     splitTree: ?[]const Node = null,
 };
 
-pub const Status = enum { ok, stale, unsupported, protected, limit, failed };
+pub const Status = enum { ok, stale, unsupported, protected, limit, failed, denied };
 
 pub const Result = struct {
     status: Status,
@@ -40,7 +41,7 @@ pub fn formatId(value: u64) Id {
     return id;
 }
 
-fn validId(id: Id) bool {
+pub fn validId(id: Id) bool {
     for (id) |byte| switch (byte) {
         '0'...'9', 'a'...'f' => {},
         else => return false,
@@ -70,7 +71,7 @@ fn validRequest(request: Request) bool {
     if (!validRequestId(request.requestId) or request.clientId.len == 0 or request.clientId.len > 64) return false;
 
     if (request.action == .@"create-tab") {
-        return request.tabId == null and request.layoutRevision == null and request.surfaceId == null and request.splitTree == null;
+        return request.tabId == null and request.layoutRevision == null and request.leaseId == null and request.surfaceId == null and request.splitTree == null;
     }
     if (!validId(request.tabId orelse return false) or !validId(request.layoutRevision orelse return false)) return false;
     return switch (request.action) {
