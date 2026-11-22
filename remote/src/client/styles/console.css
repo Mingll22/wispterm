@@ -1080,6 +1080,8 @@
 .terminal-host .xterm {
   display: block;
   background-color: transparent;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
   transform: scale(var(--remote-terminal-visual-zoom, 1));
   transform-origin: 0 0;
   will-change: transform;
@@ -1101,8 +1103,8 @@
 .terminal-mount[data-terminal-lease] .xterm {
   width: var(--terminal-grid-width, 100%);
   height: var(--terminal-grid-height, 100%);
-  inset-block-start: var(--terminal-grid-top, 0px);
-  zoom: var(--terminal-grid-zoom, 1);
+  inset-block-start: calc(var(--terminal-grid-top, 0px) / var(--terminal-grid-scale, 1));
+  zoom: var(--terminal-grid-scale, 1);
   transform: none;
   will-change: auto;
 }

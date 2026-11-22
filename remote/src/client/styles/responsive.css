@@ -325,6 +325,13 @@
     border-radius: var(--radius);
   }
 
+  .terminal-mount[data-terminal-lease] .xterm {
+    /* Scale the painted grid after xterm measures its character cells. */
+    inset-block-start: 0;
+    zoom: 1;
+    transform: translateY(var(--terminal-grid-top, 0px)) scale(var(--terminal-grid-scale, 1));
+  }
+
   .mobile-surface-selector {
     position: relative;
     display: flex;

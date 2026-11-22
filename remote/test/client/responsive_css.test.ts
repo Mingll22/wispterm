@@ -25,6 +25,16 @@ test("xterm viewport remains scrollable for remote history", async () => {
   assert.match(viewportRule, /scrollbar-width:\s*none\s*;/);
 });
 
+test("mobile visual fit leaves xterm's character measurement at its original scale", async () => {
+  const [consoleCss, mobileCss] = await Promise.all([readFile(consoleCssUrl, "utf8"), readFile(responsiveCssUrl, "utf8")]);
+  const terminal = declarationsForSelector(consoleCss, ".terminal-host .xterm").join("\n");
+  const mobileFit = declarationsForSelector(mobileCss, ".terminal-mount[data-terminal-lease] .xterm").join("\n");
+
+  assert.match(terminal, /-webkit-text-size-adjust:\s*100%;/);
+  assert.match(mobileFit, /zoom:\s*1;/);
+  assert.match(mobileFit, /transform:\s*translateY\(var\(--terminal-grid-top,\s*0px\)\) scale\(var\(--terminal-grid-scale,\s*1\)\);/);
+});
+
 test("terminal panels do not reserve redundant per-panel headers", async () => {
   const css = await readFile(consoleCssUrl, "utf8");
   const panelRule = declarationsForSelector(css, ".remote-panel").join("\n");

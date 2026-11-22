@@ -725,8 +725,8 @@ function placeTerminalGrid(view: SurfaceView): void {
   const { y, scale } = fitTerminalCanvas(viewport, grid, isMobileRemoteShell() ? state.mobileVisualZoom : 1);
   view.host.style.setProperty("--terminal-grid-width", `${grid.width}px`);
   view.host.style.setProperty("--terminal-grid-height", `${grid.height}px`);
-  view.host.style.setProperty("--terminal-grid-zoom", String(scale));
-  view.host.style.setProperty("--terminal-grid-top", `${y / scale}px`);
+  view.host.style.setProperty("--terminal-grid-scale", String(scale));
+  view.host.style.setProperty("--terminal-grid-top", `${y}px`);
 }
 
 function applyInitialSnapshot(view: SurfaceView, surface: LayoutSurface): void {
